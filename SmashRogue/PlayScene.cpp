@@ -64,9 +64,9 @@ void PlayScene::StartFloor(int floor)
 	effects_.Clear();
 
 	player_.PlaceForFloor(kArenaCenter);
+	bossFloor_ = (floor % 5 == 0);
 	GenerateObstacles();
 
-	bossFloor_ = (floor % 5 == 0);
 	wave_ = 0;
 	totalWaves_ = bossFloor_ ? 1 : std::min(2 + floor / 3, 5);
 	waveDelay_ = 70;
@@ -544,9 +544,9 @@ void PlayScene::UpdatePickups()
 
 		if (p.kind != PickupKind::Chest && dist < pickupRadius) p.magnet = true;
 		if (p.magnet) {
-			p.vel += d.Normalized() * 1.1f;
-			float maxSpeed = 14.0f;
-			if (p.vel.Length() > maxSpeed) p.vel = p.vel.Normalized() * maxSpeed;
+			// まっすぐ追いかけて徐々に加速（加速度で引くと周回してしまう）
+			p.homingSpeed = std::min(16.0f, p.homingSpeed + 0.6f);
+			p.vel = d.Normalized() * std::min(p.homingSpeed, dist);
 		} else {
 			p.vel *= 0.88f;
 		}

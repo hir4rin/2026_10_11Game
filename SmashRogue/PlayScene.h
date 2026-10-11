@@ -51,6 +51,7 @@ private:
 		int value;
 		bool magnet;
 		bool taken;
+		float homingSpeed = 2.0f;
 	};
 
 	// フロア進行

@@ -1,0 +1,1469 @@
+<title>スマッシュローグ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap">
+<style>
+/* 1枚のキャンバスに全画面で描くゲーム。地下ダンジョンの暗い一色の世界にする */
+:root {
+  --void: #0e0c14;
+  --fg: #e8e4f0;
+  --font-game: "DotGothic16", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--void);
+  color: var(--fg);
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#cv { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+#cv:focus-visible { outline: 2px solid #ffdc64; outline-offset: -2px; }
+</style>
+<canvas id="cv" tabindex="0" aria-label="スマッシュローグのゲーム画面"></canvas>
+<script>
+'use strict';
+// ===========================================================================
+// 共通
+// ===========================================================================
+const TAU = Math.PI * 2;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const rndI = (a, b) => Math.floor(a + Math.random() * (b - a + 1));
+const chance = p => Math.random() < p;
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const hyp = Math.hypot;
+const rgb = (r, g, b) => `rgb(${r | 0},${g | 0},${b | 0})`;
+function angDiff(a, b) {
+  let d = (a - b) % TAU;
+  if (d > Math.PI) d -= TAU;
+  if (d < -Math.PI) d += TAU;
+  return d;
+}
+function norm(x, y) {
+  const l = hyp(x, y);
+  return l > 1e-5 ? [x / l, y / l] : [0, 0];
+}
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const FONT = getComputedStyle(document.documentElement).getPropertyValue('--font-game').trim() || 'sans-serif';
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// 論理解像度（短辺 720）。画面の向きに合わせて長辺を伸ばす
+let W = 1280, H = 720, S = 1, OX = 0, OY = 0, DPR = 1, portrait = false;
+const A = { l: 0, t: 0, r: 0, b: 0 }; // 戦闘エリア
+let hudH = 84;
+let tallHud = false; // 縦画面や狭い横画面では HUD を2段にする
+let touchUI = false;
+let autoAttack = false;
+const BTN = { atk: {}, dash: {}, auto: {}, pause: {} };
+const cxA = () => (A.l + A.r) / 2;
+const cyA = () => (A.t + A.b) / 2;
+
+function layout() {
+  const rect = cv.getBoundingClientRect();
+  const vw = Math.max(1, rect.width), vh = Math.max(1, rect.height);
+  portrait = vh > vw * 1.05;
+  // スマホのような小さい画面では論理解像度を下げて、文字やキャラを大きく見せる
+  const short = Math.min(vw, vh) < 500 ? 560 : 720;
+  if (!portrait) { H = short; W = Math.round(clamp(short * vw / vh, 900, 1500)); }
+  else { W = short; H = Math.round(clamp(short * vh / vw, 900, 1600)); }
+  S = Math.min(vw / W, vh / H);
+  OX = (vw - W * S) / 2;
+  OY = (vh - H * S) / 2;
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(vw * DPR);
+  cv.height = Math.round(vh * DPR);
+
+  tallHud = portrait || W < 1150;
+  hudH = tallHud ? 214 : 84;
+  const ctrl = portrait && touchUI ? 290 : 0;
+  A.l = 30; A.t = hudH + 14; A.r = W - 30; A.b = H - 20 - ctrl;
+
+  if (portrait) {
+    BTN.atk = { x: W - 120, y: H - 150, r: 80 };
+    BTN.dash = { x: W - 285, y: H - 92, r: 54 };
+  } else {
+    BTN.atk = { x: W - 130, y: H - 125, r: 76 };
+    BTN.dash = { x: W - 290, y: H - 78, r: 52 };
+  }
+  BTN.auto = { x: BTN.atk.x + 10, y: BTN.atk.y - BTN.atk.r - 46, r: 32 };
+  BTN.pause = { x: W - 34, y: 30, r: 26 };
+  if (typeof Play !== 'undefined' && Play.enemies) Play.clampWorld();
+}
+
+// ===========================================================================
+// 描画ヘルパー
+// ===========================================================================
+function circ(x, y, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, TAU); ctx.fill(); }
+function ringS(x, y, r, c, w) { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, TAU); ctx.stroke(); }
+function oval(x, y, rx, ry, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x, y, Math.max(0, rx), Math.max(0, ry), 0, 0, TAU); ctx.fill(); }
+function tri(x1, y1, x2, y2, x3, y3, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill(); }
+function line(x1, y1, x2, y2, c, w) { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+function box(x1, y1, x2, y2, c) { ctx.fillStyle = c; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); }
+function boxS(x1, y1, x2, y2, c, w = 1) { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.strokeRect(x1 + w / 2, y1 + w / 2, x2 - x1 - w, y2 - y1 - w); }
+function blend(a, add) { ctx.globalAlpha = clamp(a, 0, 1); ctx.globalCompositeOperation = add ? 'lighter' : 'source-over'; }
+function noblend() { ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; }
+function text(str, x, y, size, col, align = 'left', edge = '#000') {
+  ctx.font = `${size}px ${FONT}`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'top';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(3, size / 6);
+  ctx.strokeStyle = edge;
+  ctx.strokeText(str, x, y);
+  ctx.fillStyle = col;
+  ctx.fillText(str, x, y);
+}
+function fan(x, y, r, a0, a1, c) {
+  ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, r, a0, a1, a1 < a0); ctx.closePath(); ctx.fill();
+}
+
+// ===========================================================================
+// 入力（キーボード / マウス / タッチ）
+// ===========================================================================
+const keys = new Set();
+let mouseBtns = 0;
+const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
+let atkPointer = null;
+let dashTap = false;
+let taps = [];
+
+const Input = {
+  now: {}, prev: {}, ax: 0, ay: 0,
+  update() {
+    this.prev = this.now;
+    const k = c => keys.has(c);
+    this.now = {
+      up: k('KeyW') || k('ArrowUp'),
+      down: k('KeyS') || k('ArrowDown'),
+      left: k('KeyA') || k('ArrowLeft'),
+      right: k('KeyD') || k('ArrowRight'),
+      attack: k('KeyZ') || k('KeyJ') || (mouseBtns & 1) !== 0 || atkPointer !== null,
+      dash: k('KeyX') || k('KeyK') || k('Space') || k('ShiftLeft') || (mouseBtns & 2) !== 0 || dashTap,
+      confirm: k('KeyZ') || k('Enter') || k('Space'),
+      pause: k('Escape') || k('KeyP'),
+      quit: k('KeyQ'),
+    };
+    dashTap = false;
+    let x = (this.now.right ? 1 : 0) - (this.now.left ? 1 : 0);
+    let y = (this.now.down ? 1 : 0) - (this.now.up ? 1 : 0);
+    if (x === 0 && y === 0 && joy.id !== null) {
+      x = (joy.x - joy.ox) / 70;
+      y = (joy.y - joy.oy) / 70;
+      if (hyp(x, y) < 0.15) { x = 0; y = 0; }
+    }
+    const l = hyp(x, y);
+    if (l > 1) { x /= l; y /= l; }
+    this.ax = x; this.ay = y;
+  },
+  press(b) { return !!this.now[b]; },
+  trig(b) { return !!this.now[b] && !this.prev[b]; },
+};
+
+function toLogical(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left - OX) / S, y: (e.clientY - r.top - OY) / S };
+}
+const near = (p, b, extra = 0) => hyp(p.x - b.x, p.y - b.y) < b.r + extra;
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  cv.focus({ preventScroll: true });
+  const p = toLogical(e);
+  if (e.pointerType === 'mouse') {
+    if (e.button === 0) mouseBtns |= 1;
+    if (e.button === 2) mouseBtns |= 2;
+    taps.push(p);
+    return;
+  }
+  if (!touchUI) { touchUI = true; autoAttack = true; layout(); }
+  try { cv.setPointerCapture(e.pointerId); } catch (_) { /* 失敗しても操作は続けられる */ }
+  taps.push(p);
+  if (Game.scene === 'play' && Play.state === 'playing') {
+    if (near(p, BTN.pause, 14)) return;
+    if (near(p, BTN.auto, 10)) { autoAttack = !autoAttack; return; }
+    if (near(p, BTN.atk, 24)) { atkPointer = e.pointerId; return; }
+    if (near(p, BTN.dash, 24)) { dashTap = true; return; }
+    if (joy.id === null && p.x < W * 0.62) {
+      joy.id = e.pointerId; joy.ox = p.x; joy.oy = p.y; joy.x = p.x; joy.y = p.y;
+    }
+  }
+}, { passive: false });
+cv.addEventListener('pointermove', e => {
+  if (e.pointerId === joy.id) {
+    const p = toLogical(e);
+    joy.x = p.x; joy.y = p.y;
+    // 指が遠くへ行ったら土台がついてくる
+    const dx = joy.x - joy.ox, dy = joy.y - joy.oy, l = hyp(dx, dy);
+    if (l > 90) { joy.ox = joy.x - dx / l * 90; joy.oy = joy.y - dy / l * 90; }
+  }
+});
+function releasePointer(e) {
+  if (e.pointerType === 'mouse') {
+    if (e.button === 0) mouseBtns &= ~1;
+    if (e.button === 2) mouseBtns &= ~2;
+  }
+  if (e.pointerId === joy.id) joy.id = null;
+  if (e.pointerId === atkPointer) atkPointer = null;
+}
+cv.addEventListener('pointerup', releasePointer);
+cv.addEventListener('pointercancel', releasePointer);
+cv.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('keydown', e => {
+  keys.add(e.code);
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => { keys.clear(); mouseBtns = 0; joy.id = null; atkPointer = null; });
+addEventListener('resize', layout);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && Game.scene === 'play' && Play.state === 'playing') Play.state = 'paused';
+});
+
+// ===========================================================================
+// スキル
+// ===========================================================================
+const SK = [
+  { n: 'ちから',         s: 'ちから',     d: '攻撃力が 4 上がる',                 m: 8, c: [230, 80, 70] },
+  { n: 'たいりょく',     s: 'たいりょく', d: '最大HPが 25 上がり、回復する',      m: 8, c: [90, 200, 90] },
+  { n: 'すばやさ',       s: 'すばやさ',   d: '移動速度が上がる',                  m: 5, c: [120, 220, 230] },
+  { n: 'リーチ',         s: 'リーチ',     d: '剣の攻撃範囲が広がる',              m: 5, c: [200, 200, 210] },
+  { n: 'れんげき',       s: 'れんげき',   d: '攻撃の間隔が短くなる',              m: 4, c: [240, 180, 60] },
+  { n: 'かいしん',       s: 'かいしん',   d: '会心率が 8% 上がる（ダメージ2倍）', m: 5, c: [255, 230, 80] },
+  { n: 'きゅうけつ',     s: 'きゅうけつ', d: '敵を倒すとHPが回復する',            m: 3, c: [200, 40, 90] },
+  { n: 'ファイアボール', s: 'ファイア',   d: '近くの敵へ火球を自動で放つ',        m: 5, c: [255, 120, 40] },
+  { n: 'いかずち',       s: 'いかずち',   d: '一定時間ごとに敵へ雷が落ちる',      m: 5, c: [250, 240, 120] },
+  { n: 'ガードオーブ',   s: 'オーブ',     d: '周囲を回る光の玉が敵を打つ',        m: 4, c: [140, 200, 255] },
+  { n: 'かいてんぎり',   s: 'かいてん',   d: '確率で周囲をまとめて斬る',          m: 4, c: [180, 120, 255] },
+  { n: 'ダッシュ強化',   s: 'ダッシュ',   d: 'ダッシュの間隔短縮＋体当たり攻撃',  m: 3, c: [100, 255, 180] },
+  { n: 'マグネット',     s: 'マグネット', d: '経験値を引き寄せる範囲が広がる',    m: 3, c: [120, 160, 255] },
+];
+const [POWER, VIT, SPEED, REACH, RAPID, CRIT, DRAIN, FIRE, THUNDER, ORB, SPIN, DASHUP, MAGNET] = SK.map((_, i) => i);
+const HEAL_CHOICE = -1;
+
+// ===========================================================================
+// 演出
+// ===========================================================================
+const fx = {
+  clear() { this.parts = []; this.texts = []; this.rings = []; this.bolts = []; this.shake = 0; this.sx = 0; this.sy = 0; },
+  update() {
+    for (const p of this.parts) { p.x += p.vx; p.y += p.vy; p.vx *= 0.9; p.vy *= 0.9; p.life--; }
+    for (const t of this.texts) { t.y -= t.life > 30 ? 1.2 : 0.3; t.life--; }
+    for (const r of this.rings) r.life--;
+    for (const b of this.bolts) b.life--;
+    const alive = e => e.life > 0;
+    this.parts = this.parts.filter(alive);
+    this.texts = this.texts.filter(alive);
+    this.rings = this.rings.filter(alive);
+    this.bolts = this.bolts.filter(alive);
+    this.shake *= 0.85;
+    if (this.shake < 0.3) this.shake = 0;
+    const s = reduceMotion ? 0 : this.shake;
+    this.sx = rnd(-s, s); this.sy = rnd(-s, s);
+  },
+  draw() {
+    for (const r of this.rings) {
+      const t = 1 - r.life / r.max;
+      blend(1 - t, true);
+      ringS(r.x, r.y, r.R * (0.2 + 0.8 * t), r.c, 4);
+    }
+    for (const b of this.bolts) {
+      blend(Math.min(1, b.life * 30 / 255), true);
+      for (let i = 1; i < b.pts.length; i++) {
+        const a = b.pts[i - 1], c = b.pts[i];
+        line(a[0], a[1], c[0], c[1], rgb(255, 240, 120), 8);
+        line(a[0], a[1], c[0], c[1], '#fff', 3);
+      }
+    }
+    for (const p of this.parts) {
+      const t = p.life / p.max;
+      blend(t, false);
+      circ(p.x, p.y, Math.max(0.5, p.size * t), p.c);
+    }
+    noblend();
+    for (const t of this.texts) {
+      blend(Math.min(1, t.life * 12 / 255), false);
+      text(t.s, t.x, t.y, t.big ? 26 : 18, t.c, 'center', '#14141e');
+    }
+    noblend();
+  },
+  burst(x, y, c, count, speed, size, life) {
+    for (let i = 0; i < count; i++) {
+      const a = rnd(0, TAU), v = rnd(speed * 0.3, speed), l = rndI(life >> 1, life);
+      this.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, c, size: rnd(size * 0.5, size), life: l, max: l });
+    }
+  },
+  text(x, y, s, c, big = false) { this.texts.push({ x: x + rnd(-8, 8), y, s, c, life: big ? 60 : 42, big }); },
+  ring(x, y, R, c, life) { this.rings.push({ x, y, R, c, life, max: life }); },
+  lightning(x, y) {
+    const sx = x + rnd(-40, 40), sy = A.t - 30, pts = [];
+    for (let i = 0; i <= 8; i++) {
+      const t = i / 8;
+      let qx = sx + (x - sx) * t;
+      const qy = sy + (y - sy) * t;
+      if (i !== 0 && i !== 8) qx += rnd(-22, 22);
+      pts.push([qx, qy]);
+    }
+    this.bolts.push({ pts, life: 14 });
+    this.ring(x, y, 70, rgb(255, 240, 120), 18);
+    this.burst(x, y, rgb(255, 250, 180), 14, 7, 5, 24);
+  },
+  addShake(p) { this.shake = Math.max(this.shake, p); },
+};
+fx.clear();
+
+// ===========================================================================
+// プレイヤー
+// ===========================================================================
+const PR = 18, SWING = 12, HITF = 7, DASHF = 9, ORB_R = 11;
+const player = {
+  reset() {
+    this.sk = SK.map(() => 0);
+    this.level = 1; this.exp = 0;
+    this.hp = this.maxHp();
+    this.swingId = 0; this.dashId = 0; this.frame = 0; this.orbA = 0;
+    this.place(cxA(), cyA());
+  },
+  place(x, y) {
+    this.x = x; this.y = y; this.fx = 1; this.fy = 0; this.kx = 0; this.ky = 0;
+    this.atkCd = 0; this.swing = 0; this.dash = 0; this.dashCdT = 0; this.trail = []; this.inv = 60;
+    this.swingA = 0; this.spin = false; this.dx = 1; this.dy = 0;
+  },
+  lv(id) { return this.sk[id]; },
+  isMax(id) { return this.sk[id] >= SK[id].m; },
+  maxHp() { return 100 + 25 * this.lv(VIT); },
+  atk() { return 10 + 4 * this.lv(POWER) + (this.level - 1); },
+  speed() { return 3.6 + 0.45 * this.lv(SPEED); },
+  range() { return 78 + 16 * this.lv(REACH); },
+  arc() { return 2.2 + 0.1 * this.lv(REACH); },
+  cd() { return 24 - 4 * this.lv(RAPID); },
+  crit() { return 0.05 + 0.08 * this.lv(CRIT); },
+  pickR() { return 70 + 60 * this.lv(MAGNET); },
+  dashCd() { return 70 - 15 * this.lv(DASHUP); },
+  expNext() { return 5 + this.level * 5; },
+  levelUpSkill(id) { if (this.isMax(id)) return; this.sk[id]++; if (id === VIT) this.heal(25); },
+  addExp(v) {
+    this.exp += v;
+    let ups = 0;
+    while (this.exp >= this.expNext()) { this.exp -= this.expNext(); this.level++; ups++; }
+    return ups;
+  },
+  takeDamage(d, fromX, fromY) {
+    if (this.inv > 0 || this.dash > 0 || this.hp <= 0) return false;
+    this.hp = Math.max(0, this.hp - d);
+    this.inv = 50;
+    const [nx, ny] = norm(this.x - fromX, this.y - fromY);
+    this.kx += nx * 7; this.ky += ny * 7;
+    return true;
+  },
+  heal(v) { this.hp = Math.min(this.maxHp(), this.hp + v); },
+  hitActive() { return this.swing > SWING - HITF; },
+  orbCount() { return this.lv(ORB); },
+  orbPos(i) {
+    const a = this.orbA + TAU * i / Math.max(1, this.orbCount());
+    return [this.x + Math.cos(a) * 78, this.y + Math.sin(a) * 78];
+  },
+  update(aim, wantAttack) {
+    this.frame++;
+    if (this.atkCd > 0) this.atkCd--;
+    if (this.swing > 0) this.swing--;
+    if (this.dashCdT > 0) this.dashCdT--;
+    if (this.inv > 0) this.inv--;
+    this.orbA += 0.065;
+    const mx = Input.ax, my = Input.ay, moving = mx * mx + my * my > 0.01;
+
+    if (this.dash > 0) {
+      this.dash--;
+      this.x += this.dx * 13; this.y += this.dy * 13;
+      this.trail.unshift([this.x, this.y]);
+      if (this.trail.length > 6) this.trail.pop();
+    } else {
+      if (this.trail.length) this.trail.pop();
+      const sp = this.speed() * (this.swing > 0 ? 0.55 : 1);
+      this.x += mx * sp; this.y += my * sp;
+      if (moving && this.swing === 0) [this.fx, this.fy] = norm(mx, my);
+      if (Input.trig('dash') && this.dashCdT === 0) {
+        [this.dx, this.dy] = moving ? norm(mx, my) : [this.fx, this.fy];
+        this.fx = this.dx; this.fy = this.dy;
+        this.dash = DASHF;
+        this.dashCdT = this.dashCd();
+        this.dashId++;
+        this.trail = [[this.x, this.y]];
+      }
+    }
+
+    if (wantAttack && this.atkCd === 0 && this.dash === 0) {
+      if (aim) {
+        const [ax, ay] = norm(aim.x - this.x, aim.y - this.y);
+        if (ax || ay) { this.fx = ax; this.fy = ay; }
+      }
+      this.swingA = Math.atan2(this.fy, this.fx);
+      this.spin = chance(0.15 * this.lv(SPIN));
+      this.swing = SWING;
+      this.atkCd = this.cd();
+      this.swingId++;
+    }
+    this.x += this.kx; this.y += this.ky;
+    this.kx *= 0.78; this.ky *= 0.78;
+  },
+  draw() {
+    const x = this.x, y = this.y;
+    blend(90 / 255); oval(x, y + PR * 0.85, PR * 0.9, PR * 0.35, '#000');
+    for (let i = 1; i < this.trail.length; i++) {
+      blend((120 - i * 18) / 255, true);
+      circ(this.trail[i][0], this.trail[i][1], PR, rgb(80, 160, 255));
+    }
+    noblend();
+
+    if (this.swing > 0) {
+      const t = 1 - this.swing / SWING;
+      const ease = 1 - (1 - t) * (1 - t);
+      const arc = this.spin ? TAU : this.arc();
+      const start = this.swingA - arc / 2;
+      const cur = start + arc * Math.min(1, ease * 1.25);
+      blend(140 / 255 * (1 - t), true);
+      fan(x, y, this.range(), start, cur, this.spin ? rgb(200, 140, 255) : '#fff');
+      noblend();
+      const dx = Math.cos(cur), dy = Math.sin(cur);
+      line(x + dx * PR, y + dy * PR, x + dx * this.range() * 0.92, y + dy * this.range() * 0.92, rgb(220, 230, 240), 6);
+      line(x + dx * PR, y + dy * PR, x + dx * this.range() * 0.92, y + dy * this.range() * 0.92, '#fff', 2);
+    }
+
+    const blink = this.inv > 0 && this.dash === 0 && ((this.frame / 3) | 0) % 2 === 0;
+    blend(blink ? 90 / 255 : 1);
+    circ(x, y, PR, rgb(30, 60, 140));
+    circ(x, y, PR - 2.5, rgb(70, 130, 240));
+    const ty = y - PR + 2;
+    tri(x - 7, ty + 2, x + 7, ty + 2, x + 3, ty - 10, rgb(250, 210, 70));
+    const sx = -this.fy, sy = this.fx;
+    const ex = x + this.fx * 7, ey = y + this.fy * 7;
+    for (const s of [5, -5]) {
+      circ(ex + sx * s, ey + sy * s, 3.2, '#fff');
+      circ(ex + sx * s + this.fx, ey + sy * s + this.fy, 1.8, rgb(20, 20, 40));
+    }
+    if (this.swing === 0) {
+      const hx = x + sx * (PR - 2), hy = y + sy * (PR - 2);
+      line(hx, hy, hx + this.fx * 22 + sx * 4, hy + this.fy * 22 + sy * 4, rgb(220, 230, 240), 4);
+    }
+    noblend();
+
+    for (let i = 0; i < this.orbCount(); i++) {
+      const [ox, oy] = this.orbPos(i);
+      blend(120 / 255, true); circ(ox, oy, ORB_R + 6, rgb(80, 140, 255)); noblend();
+      circ(ox, oy, ORB_R, rgb(190, 230, 255));
+    }
+
+    if (this.dashCdT > 0) {
+      const ratio = 1 - this.dashCdT / this.dashCd();
+      box(x - 18, y + 26, x + 18, y + 30, rgb(30, 30, 40));
+      box(x - 18, y + 26, x - 18 + 36 * ratio, y + 30, rgb(100, 255, 180));
+    }
+  },
+};
+
+// ===========================================================================
+// 敵
+// ===========================================================================
+const ENEMY_BASE = {
+  slime:  { r: 16, hp: 22,  atk: 8,  sp: 1.3, exp: 2,  name: 'スライム' },
+  bat:    { r: 13, hp: 14,  atk: 6,  sp: 2.4, exp: 2,  name: 'コウモリ' },
+  mage:   { r: 16, hp: 20,  atk: 10, sp: 1.5, exp: 4,  name: 'まどうし' },
+  knight: { r: 20, hp: 55,  atk: 14, sp: 1.0, exp: 6,  name: 'よろいのきし' },
+  golem:  { r: 50, hp: 500, atk: 18, sp: 0.9, exp: 60, name: 'ストーンゴーレム' },
+};
+const flash = (f, r, g, b) => (f ? '#fff' : rgb(r, g, b));
+
+class Enemy {
+  constructor(type, x, y, floor) {
+    const b = ENEMY_BASE[type];
+    this.type = type; this.x = x; this.y = y; this.kx = 0; this.ky = 0;
+    this.r = b.r;
+    this.maxHp = this.hp = Math.floor(b.hp * (1 + 0.32 * (floor - 1)));
+    this.atk = Math.floor(b.atk * (1 + 0.12 * (floor - 1)));
+    this.sp = b.sp * (1 + 0.02 * Math.min(floor, 15));
+    this.exp = b.exp + Math.floor(floor / 3);
+    this.name = b.name;
+    this.boss = type === 'golem';
+    this.alive = true;
+    this.spawn = this.boss ? 90 : 45;
+    this.hitFlash = 0; this.lastSwing = -1; this.lastDash = -1; this.orbCd = 0;
+    this.anim = 0; this.seed = rnd(0, TAU); this.strafe = chance(0.5) ? 1 : -1;
+    this.aiT = rndI(0, 60); this.st = 0; this.stT = 0; this.burst = 0; this.summonT = 0; this.adx = 0; this.ady = 0;
+  }
+  active() { return this.alive && this.spawn <= 0; }
+  charging() { return this.type === 'knight' && this.st === 2; }
+  update(w) {
+    this.anim++;
+    if (this.hitFlash > 0) this.hitFlash--;
+    if (this.orbCd > 0) this.orbCd--;
+    if (this.spawn > 0) { this.spawn--; return; }
+    this.x += this.kx; this.y += this.ky; this.kx *= 0.8; this.ky *= 0.8;
+    const tx = player.x - this.x, ty = player.y - this.y, dist = hyp(tx, ty);
+    const [dx, dy] = norm(tx, ty);
+    switch (this.type) {
+      case 'slime': {
+        const hop = Math.max(0, Math.sin(this.anim * 0.12 + this.seed));
+        const m = this.sp * (0.25 + hop * 1.5);
+        this.x += dx * m; this.y += dy * m;
+        break;
+      }
+      case 'bat': {
+        const wob = Math.sin(this.anim * 0.13 + this.seed) * 1.6;
+        this.x += dx * this.sp - dy * wob; this.y += dy * this.sp + dx * wob;
+        break;
+      }
+      case 'mage': {
+        if (dist > 330) { this.x += dx * this.sp; this.y += dy * this.sp; }
+        else if (dist < 210) { this.x -= dx * this.sp; this.y -= dy * this.sp; }
+        else { this.x += -dy * this.sp * 0.6 * this.strafe; this.y += dx * this.sp * 0.6 * this.strafe; }
+        if (++this.aiT >= 120) {
+          this.aiT = 0;
+          Play.bullets.push({ x: this.x + dx * this.r, y: this.y + dy * this.r, vx: dx * 4.2, vy: dy * 4.2, r: 8, dmg: this.atk, life: 240, mine: false, c: rgb(200, 90, 255) });
+        }
+        break;
+      }
+      case 'knight':
+        if (this.st === 0) {
+          this.x += dx * this.sp; this.y += dy * this.sp;
+          if (this.stT > 0) this.stT--;
+          if (dist < 220 && this.stT === 0) { this.st = 1; this.stT = 36; }
+        } else if (this.st === 1) {
+          if (this.stT > 10) { this.adx = dx; this.ady = dy; }
+          if (--this.stT <= 0) { this.st = 2; this.stT = 20; }
+        } else {
+          this.x += this.adx * 9.5; this.y += this.ady * 9.5;
+          if (--this.stT <= 0) { this.st = 0; this.stT = 60; }
+        }
+        break;
+      case 'golem':
+        this.updateGolem(w, dx, dy);
+        break;
+    }
+  }
+  updateGolem(w, dx, dy) {
+    const enraged = this.hp < this.maxHp / 2;
+    if (this.hp < this.maxHp * 0.6 && ++this.summonT >= 420) { this.summonT = 0; w.summon += 3; }
+    switch (this.st) {
+      case 0: {
+        const m = this.sp * (enraged ? 1.4 : 1);
+        this.x += dx * m; this.y += dy * m;
+        if (++this.aiT >= (enraged ? 100 : 150)) { this.aiT = 0; this.st = chance(0.5) ? 1 : 2; this.stT = 45; }
+        break;
+      }
+      case 1:
+        if (--this.stT <= 0) {
+          Play.waves.push({ x: this.x, y: this.y, r: this.r, max: 460, sp: enraged ? 7 : 5.5, dmg: this.atk, done: false });
+          fx.addShake(12);
+          fx.burst(this.x, this.y, rgb(170, 140, 100), 30, 10, 7, 30);
+          this.st = 3; this.stT = 40;
+        }
+        break;
+      case 2:
+        if (--this.stT <= 0) {
+          const n = enraged ? 20 : 14, base = this.seed + this.burst * 0.2;
+          for (let i = 0; i < n; i++) {
+            const a = base + TAU * i / n, ux = Math.cos(a), uy = Math.sin(a);
+            Play.bullets.push({ x: this.x + ux * this.r, y: this.y + uy * this.r, vx: ux * 3.4, vy: uy * 3.4, r: 10, dmg: Math.floor(this.atk * 2 / 3), life: 300, mine: false, c: rgb(255, 150, 60) });
+          }
+          if (++this.burst < (enraged ? 3 : 2)) this.stT = 22;
+          else { this.burst = 0; this.st = 3; this.stT = 40; }
+        }
+        break;
+      case 3:
+        if (--this.stT <= 0) this.st = 0;
+        break;
+    }
+  }
+  draw() {
+    const x = this.x, y = this.y, r = this.r;
+    let a = 1;
+    if (this.spawn > 0) {
+      const t = 1 - this.spawn / (this.boss ? 90 : 45);
+      blend(200 / 255 * t, true);
+      ringS(x, y, r * (1.6 - t * 0.6), rgb(200, 80, 255), 3);
+      circ(x, y, r * 0.6 * t, rgb(160, 60, 220));
+      noblend();
+      if (t < 0.6) return;
+      a = (t - 0.6) / 0.4;
+    }
+    blend(a * 90 / 255); oval(x, y + r * 0.85, r * 0.9, r * 0.35, '#000');
+    blend(a);
+    this.drawBody(x, y, this.hitFlash > 4, a);
+    noblend();
+    if (!this.boss && this.hp < this.maxHp && this.spawn <= 0) {
+      const w = r * 2, by = y - r - 10;
+      box(x - w / 2, by, x + w / 2, by + 4, rgb(40, 20, 20));
+      box(x - w / 2, by, x - w / 2 + w * Math.max(0, this.hp / this.maxHp), by + 4, rgb(240, 70, 60));
+    }
+    if ((this.type === 'knight' && this.st === 1) || (this.boss && (this.st === 1 || this.st === 2))) {
+      text('！', x, y - r - 40, 26, rgb(255, 80, 60), 'center', rgb(40, 0, 0));
+    }
+  }
+  drawBody(x, y, f, a) {
+    const an = this.anim, r = this.r;
+    switch (this.type) {
+      case 'slime': {
+        const hop = Math.max(0, Math.sin(an * 0.12 + this.seed)), yy = y - hop * 10, sq = 1 - hop;
+        const rx = r * (1 + 0.18 * sq), ry = r * (0.95 - 0.12 * sq);
+        oval(x, yy, rx, ry, flash(f, 40, 110, 220));
+        tri(x - 6, yy - ry + 4, x + 6, yy - ry + 4, x + 1, yy - ry - 9, flash(f, 40, 110, 220));
+        oval(x - rx * 0.4, yy - ry * 0.4, 4, 2.5, rgb(220, 240, 255));
+        circ(x - 5, yy - 1, 2.6, rgb(20, 20, 30)); circ(x + 5, yy - 1, 2.6, rgb(20, 20, 30));
+        oval(x, yy + 6, 5, 2.5, rgb(200, 40, 60));
+        break;
+      }
+      case 'bat': {
+        const fl = Math.sin(an * 0.5) * 9, wing = flash(f, 90, 50, 130), body = flash(f, 120, 70, 170);
+        tri(x - 4, y, x - 26, y - 8 + fl, x - 14, y + 8, wing);
+        tri(x + 4, y, x + 26, y - 8 + fl, x + 14, y + 8, wing);
+        circ(x, y, r, body);
+        tri(x - 9, y - 8, x - 4, y - 10, x - 8, y - 18, body);
+        tri(x + 9, y - 8, x + 4, y - 10, x + 8, y - 18, body);
+        circ(x - 4, y - 2, 2.5, rgb(255, 60, 60)); circ(x + 4, y - 2, 2.5, rgb(255, 60, 60));
+        break;
+      }
+      case 'mage': {
+        tri(x, y - 12, x - 16, y + 16, x + 16, y + 16, flash(f, 70, 40, 110));
+        circ(x, y - 6, 9, flash(f, 230, 200, 170));
+        tri(x - 13, y - 10, x + 13, y - 10, x + 4, y - 34, flash(f, 110, 50, 170));
+        circ(x - 3, y - 6, 1.8, rgb(20, 20, 30)); circ(x + 3, y - 6, 1.8, rgb(20, 20, 30));
+        line(x + 16, y - 16, x + 16, y + 16, rgb(150, 100, 60), 3);
+        const casting = this.aiT > 85;
+        if (casting) blend(a * 200 / 255, true);
+        circ(x + 16, y - 18, casting ? 7 + Math.sin(an * 0.6) * 2 : 4, rgb(220, 120, 255));
+        blend(a);
+        break;
+      }
+      case 'knight': {
+        if (this.st === 1 && ((an / 3) | 0) % 2 === 0) { blend(a * 160 / 255, true); circ(x, y, r + 6, rgb(255, 60, 40)); blend(a); }
+        circ(x, y, r, flash(f, 90, 95, 110));
+        circ(x, y - 3, r - 5, flash(f, 160, 165, 180));
+        box(x - 10, y - 6, x + 10, y - 2, rgb(20, 20, 30));
+        tri(x - 4, y - r - 2, x + 4, y - r - 2, x, y - r - 14, rgb(200, 50, 50));
+        box(x - r - 6, y - 6, x - r + 4, y + 12, flash(f, 140, 100, 50));
+        break;
+      }
+      case 'golem': {
+        if (this.st === 1 || this.st === 2) { blend(a * (100 + Math.sin(an * 0.5) * 60) / 255, true); circ(x, y, r + 10, rgb(255, 120, 40)); blend(a); }
+        const rock = flash(f, 110, 100, 85);
+        const sw = Math.sin(an * 0.08) * 6;
+        circ(x - r - 8, y + 10 + sw, 16, rock);
+        circ(x + r + 8, y + 10 - sw, 16, rock);
+        circ(x, y, r, flash(f, 90, 80, 70));
+        circ(x - 4, y - 4, r - 7, flash(f, 140, 125, 105));
+        circ(x - 22, y + 16, 9, rock); circ(x + 20, y - 22, 7, rock); circ(x + 26, y + 18, 6, rock);
+        const eye = this.hp < this.maxHp / 2 ? rgb(255, 60, 40) : rgb(255, 180, 60);
+        box(x - 22, y - 12, x - 8, y - 5, eye); box(x + 8, y - 12, x + 22, y - 5, eye);
+        break;
+      }
+    }
+  }
+}
+
+// ===========================================================================
+// ダンジョン（プレイ本体）
+// ===========================================================================
+const THEMES = [
+  { a: [72, 64, 56], b: [80, 71, 62], w: [40, 34, 30] },  // 土の洞窟
+  { a: [52, 70, 60], b: [58, 78, 66], w: [26, 40, 34] },  // 苔むした遺跡
+  { a: [56, 60, 84], b: [62, 66, 92], w: [28, 30, 48] },  // 氷の回廊
+  { a: [84, 52, 48], b: [92, 58, 52], w: [46, 24, 22] },  // 溶岩の間
+  { a: [66, 52, 80], b: [72, 58, 88], w: [36, 26, 46] },  // 魔の城
+];
+const TRANSITION = 60, DYING = 120, SELECT_DELAY = 25;
+
+const Play = {
+  start() {
+    player.reset();
+    this.kills = 0; this.frames = 0; this.pendLv = 0; this.pendChest = 0;
+    this.fireT = 0; this.thunT = 0; this.over = false; this.quit = false;
+    this.startFloor(1);
+  },
+  startFloor(f) {
+    this.floor = f;
+    this.enemies = []; this.bullets = []; this.waves = []; this.pickups = [];
+    fx.clear();
+    player.place(cxA(), cyA());
+    this.boss = f % 5 === 0;
+    this.genObstacles();
+    this.wave = 0;
+    this.totalWaves = this.boss ? 1 : Math.min(2 + Math.floor(f / 3), 5);
+    this.waveDelay = 70;
+    this.stairs = null;
+    this.banner = 150; this.hitStop = 0; this.state = 'playing'; this.stT = 0;
+  },
+  genObstacles() {
+    this.obs = [];
+    const n = this.boss ? rndI(2, 3) : rndI(3, 7);
+    for (let tries = 0; tries < 200 && this.obs.length < n; tries++) {
+      const r = rnd(24, 46);
+      const x = rnd(A.l + 90, A.r - 90), y = rnd(A.t + 80, A.b - 80);
+      if (hyp(x - cxA(), y - cyA()) < 170 + r) continue;
+      if (this.obs.some(o => hyp(o.x - x, o.y - y) < o.r + r + 90)) continue;
+      this.obs.push({ x, y, r });
+    }
+  },
+  hitsObstacle(x, y, r) { return this.obs.some(o => hyp(x - o.x, y - o.y) < o.r + r); },
+  pushOut(e, r) {
+    for (const o of this.obs) {
+      const dx = e.x - o.x, dy = e.y - o.y, d = hyp(dx, dy), min = o.r + r;
+      if (d < min) {
+        const [nx, ny] = d > 0.01 ? [dx / d, dy / d] : [1, 0];
+        e.x = o.x + nx * min; e.y = o.y + ny * min;
+      }
+    }
+    e.x = clamp(e.x, A.l + r, A.r - r);
+    e.y = clamp(e.y, A.t + r, A.b - r);
+  },
+  // 画面の向きが変わってエリアが縮んだときに中へ収める
+  clampWorld() {
+    for (const o of this.obs) { o.x = clamp(o.x, A.l + o.r + 40, A.r - o.r - 40); o.y = clamp(o.y, A.t + o.r + 40, A.b - o.r - 40); }
+    this.pushOut(player, PR);
+    for (const e of this.enemies) this.pushOut(e, e.r);
+    for (const p of this.pickups) { p.x = clamp(p.x, A.l + 10, A.r - 10); p.y = clamp(p.y, A.t + 10, A.b - 10); }
+    if (this.stairs) { this.stairs.x = clamp(this.stairs.x, A.l + 40, A.r - 40); this.stairs.y = clamp(this.stairs.y, A.t + 40, A.b - 40); }
+  },
+  freePos(r, minDist) {
+    let x = cxA(), y = cyA();
+    for (let i = 0; i < 100; i++) {
+      x = rnd(A.l + r + 10, A.r - r - 10); y = rnd(A.t + r + 10, A.b - r - 10);
+      if (hyp(x - player.x, y - player.y) < minDist) continue;
+      if (this.hitsObstacle(x, y, r + 10)) continue;
+      return { x, y };
+    }
+    return { x, y };
+  },
+  pickType() {
+    const f = this.floor;
+    const table = [['slime', 10], ['bat', f >= 2 ? 7 : 0], ['mage', f >= 3 ? 4 + Math.floor(f / 3) : 0], ['knight', f >= 4 ? 3 + Math.floor(f / 2) : 0]];
+    let r = rndI(0, table.reduce((s, e) => s + e[1], 0) - 1);
+    for (const [t, w] of table) { if (r < w) return t; r -= w; }
+    return 'slime';
+  },
+  spawn(type, p) { this.enemies.push(new Enemy(type, p.x, p.y, this.floor)); },
+  spawnWave() {
+    this.wave++;
+    if (this.boss) {
+      this.spawn('golem', { x: cxA(), y: A.t + 140 });
+      for (let i = 0; i < 3 + Math.floor(this.floor / 5); i++) this.spawn(this.pickType(), this.freePos(20, 250));
+      fx.addShake(8);
+      return;
+    }
+    const n = Math.min(5 + this.floor * 2 + this.wave * 2, 30);
+    for (let i = 0; i < n; i++) this.spawn(this.pickType(), this.freePos(20, 230));
+  },
+  openStairs() {
+    this.stairs = this.freePos(40, 200);
+    fx.ring(this.stairs.x, this.stairs.y, 120, rgb(255, 230, 120), 40);
+    fx.text(player.x, player.y - 50, 'かいだんが あらわれた！', rgb(255, 230, 120), true);
+    for (const p of this.pickups) if (p.kind === 'exp') p.magnet = true;
+    if (this.boss || chance(0.4)) {
+      const p = this.freePos(30, 150);
+      this.pickups.push({ kind: 'chest', x: p.x, y: p.y, vx: 0, vy: 0, v: 0, magnet: false, taken: false });
+    }
+  },
+
+  // ---------------------------------------------------------------- 更新
+  update() {
+    switch (this.state) {
+      case 'playing':
+        if (Input.trig('pause') || this.tappedPause()) { this.state = 'paused'; return; }
+        this.updatePlaying();
+        break;
+      case 'select':
+        this.updateSelect();
+        break;
+      case 'paused': {
+        if (Input.trig('pause') || this.tappedPause()) { this.state = 'playing'; break; }
+        if (Input.trig('quit')) { this.quit = true; break; }
+        for (const t of taps) {
+          if (hitRect(t, this.pauseButtons().resume)) this.state = 'playing';
+          else if (hitRect(t, this.pauseButtons().title)) this.quit = true;
+        }
+        break;
+      }
+      case 'transition':
+        this.stT++;
+        if (this.stT === TRANSITION / 2) { this.startFloor(this.floor + 1); this.state = 'transition'; this.stT = TRANSITION / 2; }
+        if (this.stT >= TRANSITION) this.state = 'playing';
+        fx.update();
+        break;
+      case 'dying':
+        this.stT++;
+        fx.update();
+        if (this.stT >= DYING) this.over = true;
+        break;
+    }
+  },
+  tappedPause() { return taps.some(t => near(t, BTN.pause, 14)); },
+  pauseButtons() {
+    const w = 300, h = 64, x = (W - w) / 2, y = H / 2;
+    return { resume: { x, y, w, h }, title: { x, y: y + 84, w, h } };
+  },
+  updatePlaying() {
+    if (this.banner > 0) this.banner--;
+    if (this.hitStop > 0) { this.hitStop--; return; }
+    this.frames++;
+
+    const aim = this.nearest(player.x, player.y, player.range() * 1.8);
+    const autoFire = autoAttack && aim && hyp(aim.x - player.x, aim.y - player.y) - aim.r < player.range() * 1.15;
+    player.update(aim, Input.press('attack') || autoFire);
+
+    const w = { summon: 0 };
+    for (const e of this.enemies) e.update(w);
+    for (let i = 0; i < w.summon; i++) this.spawn(chance(0.5) ? 'bat' : 'slime', this.freePos(20, 200));
+
+    this.updateAttacks();
+    this.updateSkills();
+    this.updateBullets();
+    this.updateShockwaves();
+    for (const e of this.enemies) {
+      if (e.active() && hyp(e.x - player.x, e.y - player.y) < e.r + PR - 4) {
+        this.hurtPlayer(e.charging() ? Math.floor(e.atk * 3 / 2) : e.atk, e.x, e.y);
+      }
+    }
+    this.resolveCollisions();
+    this.enemies = this.enemies.filter(e => e.alive);
+    this.updatePickups();
+    this.updateWaves();
+    fx.update();
+
+    if (player.hp <= 0) {
+      this.state = 'dying'; this.stT = 0;
+      fx.burst(player.x, player.y, rgb(80, 140, 255), 40, 9, 7, 60);
+      fx.addShake(14);
+      return;
+    }
+    if (this.stairs && hyp(player.x - this.stairs.x, player.y - this.stairs.y) < 30) {
+      this.state = 'transition'; this.stT = 0;
+      return;
+    }
+    if (this.pendChest > 0) this.openSelect(true);
+    else if (this.pendLv > 0) this.openSelect(false);
+  },
+  nearest(x, y, maxDist) {
+    let best = null, bd = maxDist;
+    for (const e of this.enemies) {
+      if (!e.active()) continue;
+      const d = hyp(e.x - x, e.y - y) - e.r;
+      if (d < bd) { bd = d; best = e; }
+    }
+    return best;
+  },
+  updateAttacks() {
+    if (player.hitActive()) {
+      const range = player.range(), half = player.arc() / 2;
+      let hit = false;
+      for (const e of this.enemies) {
+        if (!e.active() || e.lastSwing === player.swingId) continue;
+        const dx = e.x - player.x, dy = e.y - player.y, d = hyp(dx, dy);
+        if (d > range + e.r) continue;
+        if (!player.spin && d > e.r) {
+          const tol = Math.asin(Math.min(1, e.r / d));
+          if (Math.abs(angDiff(Math.atan2(dy, dx), player.swingA)) > half + tol) continue;
+        }
+        e.lastSwing = player.swingId;
+        const dmg = player.spin ? Math.floor(player.atk() * 13 / 10) : player.atk();
+        this.damageEnemy(e, dmg, dx, dy, 9, true);
+        hit = true;
+      }
+      if (hit) { this.hitStop = Math.max(this.hitStop, 3); fx.addShake(3); }
+    }
+    const dlv = player.lv(DASHUP);
+    if (dlv > 0 && player.dash > 0) {
+      for (const e of this.enemies) {
+        if (!e.active() || e.lastDash === player.dashId) continue;
+        const dx = e.x - player.x, dy = e.y - player.y;
+        if (hyp(dx, dy) > PR + e.r + 6) continue;
+        e.lastDash = player.dashId;
+        this.damageEnemy(e, Math.floor(player.atk() * (4 + dlv * 4) / 10), dx, dy, 12, false);
+      }
+    }
+    const olv = player.lv(ORB);
+    for (let i = 0; i < player.orbCount(); i++) {
+      const [ox, oy] = player.orbPos(i);
+      for (const e of this.enemies) {
+        if (!e.active() || e.orbCd > 0) continue;
+        const dx = e.x - ox, dy = e.y - oy;
+        if (hyp(dx, dy) > ORB_R + e.r) continue;
+        e.orbCd = 24;
+        this.damageEnemy(e, 5 + olv * 3 + Math.floor(player.atk() / 4), dx, dy, 5, false);
+      }
+    }
+  },
+  updateSkills() {
+    const flv = player.lv(FIRE);
+    if (flv > 0 && ++this.fireT >= 100 - flv * 10) {
+      const t = this.nearest(player.x, player.y, 520);
+      if (t) {
+        this.fireT = 0;
+        const shots = 1 + Math.floor((flv - 1) / 2);
+        const base = Math.atan2(t.y - player.y, t.x - player.x);
+        for (let i = 0; i < shots; i++) {
+          const a = base + (i - (shots - 1) / 2) * 0.25;
+          this.bullets.push({ x: player.x, y: player.y, vx: Math.cos(a) * 8, vy: Math.sin(a) * 8, r: 10, dmg: 8 + flv * 5 + Math.floor(player.atk() / 3), life: 120, mine: true, c: rgb(255, 130, 40) });
+        }
+      }
+    }
+    const tlv = player.lv(THUNDER);
+    if (tlv > 0 && ++this.thunT >= 210 - tlv * 25) {
+      const cand = this.enemies.filter(e => e.active());
+      if (cand.length) {
+        this.thunT = 0;
+        const strikes = 1 + Math.floor(tlv / 3);
+        for (let s = 0; s < strikes; s++) {
+          const at = cand[rndI(0, cand.length - 1)];
+          const ax = at.x, ay = at.y;
+          fx.lightning(ax, ay);
+          fx.addShake(5);
+          for (const e of this.enemies) {
+            const dx = e.x - ax, dy = e.y - ay;
+            if (e.active() && hyp(dx, dy) < 70 + e.r) this.damageEnemy(e, 18 + tlv * 10, dx, dy, 4, false);
+          }
+        }
+      }
+    }
+  },
+  updateBullets() {
+    for (const b of this.bullets) {
+      b.x += b.vx; b.y += b.vy; b.life--;
+      if (b.x < A.l || b.x > A.r || b.y < A.t || b.y > A.b || this.hitsObstacle(b.x, b.y, b.r)) {
+        b.life = 0; fx.burst(b.x, b.y, b.c, 5, 3, 4, 14); continue;
+      }
+      if (b.mine) {
+        for (const e of this.enemies) {
+          if (!e.active() || hyp(e.x - b.x, e.y - b.y) > e.r + b.r) continue;
+          this.damageEnemy(e, b.dmg, b.vx, b.vy, 5, true);
+          fx.burst(b.x, b.y, b.c, 10, 5, 5, 18);
+          b.life = 0;
+          break;
+        }
+      } else if (hyp(player.x - b.x, player.y - b.y) < PR + b.r - 3) {
+        this.hurtPlayer(b.dmg, b.x, b.y);
+        b.life = 0;
+      }
+    }
+    this.bullets = this.bullets.filter(b => b.life > 0);
+  },
+  updateShockwaves() {
+    for (const w of this.waves) {
+      w.r += w.sp;
+      const d = hyp(player.x - w.x, player.y - w.y);
+      if (!w.done && Math.abs(d - w.r) < 14 + PR) { w.done = true; this.hurtPlayer(w.dmg, w.x, w.y); }
+    }
+    this.waves = this.waves.filter(w => w.r < w.max);
+  },
+  hurtPlayer(d, fx_, fy_) {
+    if (!player.takeDamage(d, fx_, fy_)) return;
+    fx.text(player.x, player.y - 30, String(d), rgb(255, 80, 80), true);
+    fx.burst(player.x, player.y, rgb(255, 80, 80), 12, 6, 5, 24);
+    fx.addShake(8);
+    this.hitStop = Math.max(this.hitStop, 5);
+    if (navigator.vibrate && touchUI) { try { navigator.vibrate(40); } catch (_) { /* 非対応端末 */ } }
+  },
+  resolveCollisions() {
+    const es = this.enemies;
+    for (let i = 0; i < es.length; i++) {
+      for (let j = i + 1; j < es.length; j++) {
+        const a = es[i], b = es[j];
+        if (!a.active() || !b.active()) continue;
+        const dx = b.x - a.x, dy = b.y - a.y, d = hyp(dx, dy), min = a.r + b.r;
+        if (d >= min) continue;
+        const [nx, ny] = d > 0.01 ? [dx / d, dy / d] : [1, 0];
+        const push = (min - d) / 2;
+        const wa = a.boss ? 0.1 : b.boss ? 1.9 : 1, wb = 2 - wa;
+        a.x -= nx * push * wa; a.y -= ny * push * wa;
+        b.x += nx * push * wb; b.y += ny * push * wb;
+      }
+    }
+    for (const e of es) this.pushOut(e, e.r);
+    this.pushOut(player, PR);
+  },
+  damageEnemy(e, base, kx, ky, power, canCrit) {
+    if (!e.active()) return;
+    const crit = canCrit && chance(player.crit());
+    const dmg = Math.max(1, Math.floor((crit ? base * 2 : base) * rnd(0.9, 1.1)));
+    e.hp -= dmg;
+    e.hitFlash = 8;
+    const [nx, ny] = norm(kx, ky), k = power * (e.boss ? 0.1 : 1);
+    e.kx += nx * k; e.ky += ny * k;
+    const ty = e.y - e.r - 14;
+    if (crit) {
+      fx.text(e.x, ty, dmg + '!', rgb(255, 220, 60), true);
+      fx.burst(e.x, e.y, rgb(255, 220, 80), 12, 8, 5, 22);
+      this.hitStop = Math.max(this.hitStop, 5);
+    } else {
+      fx.text(e.x, ty, String(dmg), '#fff');
+      fx.burst(e.x, e.y, rgb(255, 255, 220), 5, 5, 4, 16);
+    }
+    if (e.hp <= 0) this.killEnemy(e);
+  },
+  killEnemy(e) {
+    e.alive = false;
+    this.kills++;
+    fx.burst(e.x, e.y, '#fff', e.boss ? 60 : 14, e.boss ? 12 : 6, 6, 30);
+    let remain = e.exp;
+    while (remain > 0) {
+      const v = Math.min(5, remain); remain -= v;
+      const a = rnd(0, TAU), s = rnd(1, 4);
+      this.pickups.push({ kind: 'exp', x: e.x, y: e.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, v, magnet: false, taken: false });
+    }
+    if (chance(e.boss ? 1 : 0.05)) {
+      const a = rnd(0, TAU);
+      this.pickups.push({ kind: 'herb', x: e.x, y: e.y, vx: Math.cos(a) * 2, vy: Math.sin(a) * 2, v: 0, magnet: false, taken: false });
+    }
+    if (player.lv(DRAIN) > 0) player.heal(player.lv(DRAIN) * 2);
+    if (e.boss) {
+      fx.addShake(20);
+      fx.ring(e.x, e.y, 300, rgb(255, 200, 100), 50);
+      fx.text(e.x, e.y - 80, 'ボスを たおした！', rgb(255, 220, 100), true);
+      this.hitStop = 30;
+      for (const o of this.enemies) {
+        if (o.alive && !o.boss) { o.alive = false; fx.burst(o.x, o.y, rgb(200, 120, 255), 10, 5, 5, 24); }
+      }
+      this.bullets = []; this.waves = [];
+    }
+  },
+  updatePickups() {
+    const pr = player.pickR();
+    for (const p of this.pickups) {
+      const dx = player.x - p.x, dy = player.y - p.y, d = hyp(dx, dy);
+      if (p.kind !== 'chest' && d < pr) p.magnet = true;
+      if (p.magnet) {
+        // まっすぐ追いかけて徐々に加速（加速度で引くと周回してしまう）
+        const [nx, ny] = norm(dx, dy);
+        p.sp = Math.min(16, (p.sp || 2) + 0.6);
+        const s = Math.min(p.sp, d);
+        p.vx = nx * s; p.vy = ny * s;
+      } else { p.vx *= 0.88; p.vy *= 0.88; }
+      p.x += p.vx; p.y += p.vy;
+      if (d < PR + 10) {
+        p.taken = true;
+        if (p.kind === 'exp') {
+          const ups = player.addExp(p.v);
+          if (ups > 0) {
+            this.pendLv += ups;
+            fx.text(player.x, player.y - 46, 'レベルアップ！', rgb(120, 255, 160), true);
+            fx.ring(player.x, player.y, 90, rgb(120, 255, 160), 30);
+          }
+        } else if (p.kind === 'herb') {
+          const amount = Math.floor(player.maxHp() / 4);
+          player.heal(amount);
+          fx.text(player.x, player.y - 46, '+' + amount, rgb(100, 255, 120), true);
+          fx.burst(player.x, player.y, rgb(100, 255, 120), 14, 5, 4, 26);
+        } else {
+          this.pendChest++;
+          fx.burst(p.x, p.y, rgb(255, 220, 80), 30, 8, 6, 36);
+          fx.ring(p.x, p.y, 100, rgb(255, 220, 80), 30);
+        }
+      }
+    }
+    this.pickups = this.pickups.filter(p => !p.taken);
+  },
+  updateWaves() {
+    if (this.stairs || this.enemies.length) return;
+    if (this.wave < this.totalWaves) {
+      if (--this.waveDelay <= 0) { this.spawnWave(); this.waveDelay = 50; }
+    } else this.openStairs();
+  },
+
+  // ---------------------------------------------------------------- スキル選択
+  openSelect(fromChest) {
+    if (fromChest) this.pendChest--; else this.pendLv--;
+    this.fromChest = fromChest;
+    const pool = SK.map((_, i) => i).filter(i => !player.isMax(i));
+    this.choices = [];
+    while (pool.length && this.choices.length < 3) this.choices.push(pool.splice(rndI(0, pool.length - 1), 1)[0]);
+    if (!this.choices.length) this.choices.push(HEAL_CHOICE);
+    this.cursor = 0; this.stT = 0; this.state = 'select';
+    atkPointer = null; // ボタンを押したまま次の操作に入らないように
+  },
+  selectTop() { return portrait ? hudH + 30 : 120; },
+  cardRects() {
+    const n = this.choices.length, rects = [];
+    if (portrait) {
+      const w = W - 80, h = 180, gap = 22, total = n * h + (n - 1) * gap;
+      const y0 = Math.max(this.selectTop() + 140, (H - total) / 2 + 60);
+      for (let i = 0; i < n; i++) rects.push({ x: 40, y: y0 + i * (h + gap), w, h });
+    } else {
+      const w = 320, h = 220, gap = 30, total = n * w + (n - 1) * gap, x0 = (W - total) / 2;
+      for (let i = 0; i < n; i++) rects.push({ x: x0 + i * (w + gap), y: 270, w, h });
+    }
+    return rects;
+  },
+  choose(i) {
+    const id = this.choices[i];
+    if (id === HEAL_CHOICE) player.heal(player.maxHp());
+    else { player.levelUpSkill(id); fx.ring(player.x, player.y, 100, rgb(...SK[id].c), 30); }
+    player.heal(Math.floor(player.maxHp() / 10)); // レベルアップのおまけ回復
+    this.state = 'playing';
+  },
+  updateSelect() {
+    fx.update();
+    if (++this.stT < SELECT_DELAY) return;
+    const n = this.choices.length;
+    if (Input.trig('left') || Input.trig('up')) this.cursor = (this.cursor + n - 1) % n;
+    if (Input.trig('right') || Input.trig('down')) this.cursor = (this.cursor + 1) % n;
+    if (Input.trig('confirm')) { this.choose(this.cursor); return; }
+    const rects = this.cardRects();
+    for (const t of taps) {
+      const i = rects.findIndex(r => hitRect(t, r));
+      if (i >= 0) { this.choose(i); return; }
+    }
+  },
+
+  // ---------------------------------------------------------------- 描画
+  draw() {
+    ctx.save();
+    ctx.translate(fx.sx, fx.sy);
+    this.drawFloor();
+    this.drawPickups();
+    for (const w of this.waves) {
+      blend(230 / 255 * (1 - w.r / w.max), true);
+      ringS(w.x, w.y, w.r, rgb(255, 160, 80), 10);
+    }
+    noblend();
+    const sorted = [...this.enemies].sort((a, b) => a.y - b.y);
+    let drawn = this.state === 'dying';
+    for (const e of sorted) {
+      if (!drawn && e.y > player.y) { player.draw(); drawn = true; }
+      e.draw();
+    }
+    if (!drawn) player.draw();
+    for (const b of this.bullets) {
+      blend(160 / 255, true); circ(b.x, b.y, b.r + 5, b.c); noblend();
+      circ(b.x, b.y, b.r * 0.6, rgb(255, 255, 230));
+    }
+    fx.draw();
+    ctx.restore();
+
+    this.drawHud();
+    if (touchUI && (this.state === 'playing' || this.state === 'transition')) this.drawTouchControls();
+
+    if (this.banner > 0 && this.state !== 'transition') {
+      blend(Math.min(1, this.banner * 6 / 255));
+      text(`B${this.floor}F`, W / 2, H * 0.36, 72, '#fff', 'center');
+      if (this.boss) text('― ボスの気配がする… ―', W / 2, H * 0.36 + 92, 32, rgb(255, 120, 100), 'center');
+      noblend();
+    }
+
+    if (this.state === 'select') this.drawSelect();
+    else if (this.state === 'paused') {
+      blend(160 / 255); box(0, 0, W, H, '#000'); noblend();
+      text('ポーズ', W / 2, H / 2 - 150, 72, '#fff', 'center');
+      const pb = this.pauseButtons();
+      drawButton(pb.resume, 'さいかい', rgb(120, 255, 160));
+      drawButton(pb.title, 'タイトルへ', rgb(220, 220, 230));
+      if (!touchUI) text('Esc / P : さいかい      Q : タイトルへ', W / 2, pb.title.y + 100, 20, rgb(200, 200, 210), 'center');
+    } else if (this.state === 'transition') {
+      const t = this.stT / TRANSITION, a = t < 0.5 ? t * 2 : (1 - t) * 2;
+      blend(a); box(0, 0, W, H, '#000'); noblend();
+    } else if (this.state === 'dying') {
+      blend(200 / 255 * this.stT / DYING); box(0, 0, W, H, rgb(60, 0, 0)); noblend();
+    }
+  },
+  drawFloor() {
+    const th = THEMES[Math.floor((this.floor - 1) / 2) % THEMES.length];
+    box(-40, -40, W + 40, H + 40, rgb(14, 12, 18));
+    box(A.l - 14, A.t - 14, A.r + 14, A.b + 14, rgb(...th.w));
+    const tile = 48, ca = rgb(...th.a), cb = rgb(...th.b);
+    for (let y = A.t, ty = 0; y < A.b; y += tile, ty++) {
+      for (let x = A.l, tx = 0; x < A.r; x += tile, tx++) {
+        box(x, y, Math.min(x + tile, A.r), Math.min(y + tile, A.b), (tx + ty) % 2 ? cb : ca);
+      }
+    }
+    if (this.stairs) {
+      const { x, y } = this.stairs, pulse = (Math.sin(this.frames * 0.1) + 1) / 2;
+      blend((80 + 80 * pulse) / 255, true); circ(x, y, 46 + pulse * 6, rgb(255, 220, 120)); noblend();
+      box(x - 28, y - 28, x + 28, y + 28, rgb(20, 16, 14));
+      for (let i = 0; i < 4; i++) {
+        const sy = y - 24 + i * 13;
+        box(x - 24 + i * 4, sy, x + 24 - i * 4, sy + 6, rgb(110 - i * 20, 100 - i * 20, 90 - i * 18));
+      }
+      text('▼ つぎへ', x, y - 58, 18, rgb(255, 230, 140), 'center', rgb(30, 20, 0));
+    }
+    for (const o of this.obs) {
+      blend(100 / 255); oval(o.x + 6, o.y + o.r * 0.6, o.r, o.r * 0.45, '#000'); noblend();
+      circ(o.x, o.y, o.r, rgb(70, 66, 72));
+      circ(o.x - o.r * 0.15, o.y - o.r * 0.15, o.r * 0.8, rgb(110, 106, 112));
+      circ(o.x - o.r * 0.35, o.y - o.r * 0.35, o.r * 0.25, rgb(150, 146, 152));
+    }
+  },
+  drawPickups() {
+    for (const p of this.pickups) {
+      if (p.kind === 'exp') {
+        const s = 4 + p.v, c = p.v >= 5 ? rgb(120, 255, 140) : rgb(100, 200, 255);
+        blend(110 / 255, true); circ(p.x, p.y, s + 4, c); noblend();
+        tri(p.x, p.y - s, p.x + s * 0.7, p.y, p.x - s * 0.7, p.y, c);
+        tri(p.x, p.y + s, p.x + s * 0.7, p.y, p.x - s * 0.7, p.y, c);
+      } else if (p.kind === 'herb') {
+        oval(p.x - 5, p.y, 6, 10, rgb(60, 200, 80));
+        oval(p.x + 5, p.y, 6, 10, rgb(80, 230, 100));
+        line(p.x, p.y + 4, p.x, p.y + 14, rgb(60, 140, 50), 2);
+      } else {
+        const bob = Math.sin(this.frames * 0.08) * 3, x = p.x, y = p.y;
+        blend(90 / 255, true); circ(x, y, 34, rgb(255, 220, 80)); noblend();
+        box(x - 20, y - 12 + bob, x + 20, y + 14 + bob, rgb(150, 80, 30));
+        box(x - 20, y - 16 + bob, x + 20, y - 4 + bob, rgb(190, 110, 40));
+        box(x - 20, y - 5 + bob, x + 20, y - 2 + bob, rgb(240, 200, 60));
+        box(x - 4, y - 8 + bob, x + 4, y + 4 + bob, rgb(250, 220, 80));
+      }
+    }
+  },
+  drawHud() {
+    box(0, 0, W, hudH, rgb(18, 16, 24));
+    box(0, hudH, W, hudH + 1, rgb(70, 60, 90));
+    // 2段HUD（縦画面など）では右上にフロア、HPバーは残りの幅いっぱい
+    const bx = 20, bw = tallHud ? Math.min(360, W - 210) : 300;
+    const hr = player.hp / player.maxHp();
+    const hc = hr > 0.5 ? rgb(80, 220, 100) : hr > 0.25 ? rgb(240, 200, 60) : rgb(240, 70, 60);
+    box(bx, 14, bx + bw, 38, rgb(40, 30, 40));
+    box(bx, 14, bx + bw * hr, 38, hc);
+    boxS(bx, 14, bx + bw, 38, rgb(200, 200, 210), 2);
+    text(`HP ${player.hp} / ${player.maxHp()}`, bx + 8, 16, 18, '#fff');
+    const er = player.exp / player.expNext();
+    box(bx, 46, bx + bw, 58, rgb(30, 30, 50));
+    box(bx, 46, bx + bw * er, 58, rgb(90, 170, 255));
+    boxS(bx, 46, bx + bw, 58, rgb(150, 150, 180), 1);
+    text(`Lv ${player.level}   こうげき ${player.atk()}`, bx, 62, 17, rgb(200, 210, 255));
+
+    const fx0 = tallHud ? bx + bw + 24 : 340;
+    text(`B${this.floor}F`, fx0, 8, 36, rgb(255, 230, 140));
+    const sub = this.stairs ? 'かいだんへ！' : this.boss ? 'BOSS' : `WAVE ${Math.max(1, this.wave)}/${this.totalWaves}`;
+    text(sub, fx0, 54, 17, this.stairs ? rgb(255, 230, 140) : this.boss ? rgb(255, 100, 90) : rgb(220, 220, 220));
+    const time = `${Math.floor(this.frames / 3600)}:${String(Math.floor(this.frames / 60) % 60).padStart(2, '0')}`;
+    if (tallHud) {
+      text(`たおした数 ${this.kills}   じかん ${time}`, bx, 86, 17, rgb(220, 220, 220));
+    } else {
+      text(`たおした数 ${this.kills}`, 470, 16, 17, rgb(220, 220, 220));
+      text(`じかん ${time}`, 470, 42, 17, rgb(220, 220, 220));
+    }
+
+    // 取得スキル
+    const chipW = 112, x0 = tallHud ? 20 : 640, y0 = tallHud ? 112 : 6, maxX = tallHud ? W - 16 : W - 70;
+    let cx = x0, cy = y0;
+    for (let i = 0; i < SK.length; i++) {
+      const lv = player.lv(i);
+      if (!lv) continue;
+      if (cx + chipW > maxX && cx !== x0) { cx = x0; cy += 25; }
+      const [r, g, b] = SK[i].c;
+      box(cx, cy, cx + chipW - 4, cy + 22, rgb(r / 4, g / 4, b / 4));
+      box(cx, cy, cx + 4, cy + 22, rgb(r, g, b));
+      text(`${SK[i].s} ${lv}`, cx + 9, cy + 3, 15, rgb(r, g, b), 'left', rgb(10, 10, 14));
+      cx += chipW;
+    }
+
+    // ポーズボタン
+    const pb = BTN.pause;
+    circ(pb.x, pb.y, pb.r, rgb(40, 36, 54));
+    box(pb.x - 8, pb.y - 10, pb.x - 3, pb.y + 10, rgb(220, 220, 230));
+    box(pb.x + 3, pb.y - 10, pb.x + 8, pb.y + 10, rgb(220, 220, 230));
+
+    for (const e of this.enemies) {
+      if (!e.boss || !e.alive) continue;
+      const w = Math.min(700, W - 120), x = (W - w) / 2, y = A.b - 34;
+      box(x - 2, y - 2, x + w + 2, y + 18, rgb(10, 10, 10));
+      box(x, y, x + w * Math.max(0, e.hp) / e.maxHp, y + 16, rgb(220, 60, 50));
+      text(e.name, x, y - 26, 18, rgb(255, 200, 180));
+    }
+  },
+  drawTouchControls() {
+    if (portrait) {
+      box(0, A.b + 20, W, H, rgb(16, 14, 22));
+      box(0, A.b + 20, W, A.b + 21, rgb(50, 44, 66));
+    }
+    // スティック
+    if (joy.id !== null) {
+      blend(0.35); circ(joy.ox, joy.oy, 70, rgb(40, 40, 60));
+      blend(0.6); ringS(joy.ox, joy.oy, 70, rgb(200, 200, 230), 3);
+      const dx = joy.x - joy.ox, dy = joy.y - joy.oy, l = hyp(dx, dy), m = Math.min(l, 70);
+      const kx = l > 0 ? joy.ox + dx / l * m : joy.ox, ky = l > 0 ? joy.oy + dy / l * m : joy.oy;
+      blend(0.85); circ(kx, ky, 32, rgb(220, 220, 240));
+      noblend();
+    } else {
+      const hx = portrait ? 115 : 170, hy = H - 140;
+      blend(0.25); ringS(hx, hy, 70, rgb(200, 200, 230), 3); circ(hx, hy, 30, rgb(200, 200, 230));
+      noblend();
+      text('ここをドラッグで いどう', hx, hy + 84, 16, rgb(170, 170, 190), 'center');
+    }
+    // 攻撃
+    const a = BTN.atk, pressed = atkPointer !== null;
+    blend(pressed ? 0.85 : 0.55); circ(a.x, a.y, a.r, pressed ? rgb(240, 110, 80) : rgb(200, 80, 60));
+    blend(0.9); ringS(a.x, a.y, a.r, rgb(255, 200, 180), 3); noblend();
+    text('こうげき', a.x, a.y - 12, 22, '#fff', 'center');
+    // ダッシュ
+    const d = BTN.dash, ready = player.dashCdT === 0;
+    blend(ready ? 0.55 : 0.3); circ(d.x, d.y, d.r, rgb(60, 170, 130));
+    if (!ready) {
+      blend(0.7);
+      ctx.strokeStyle = rgb(100, 255, 180); ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.arc(d.x, d.y, d.r - 3, -Math.PI / 2, -Math.PI / 2 + TAU * (1 - player.dashCdT / player.dashCd())); ctx.stroke();
+    }
+    noblend();
+    text('ダッシュ', d.x, d.y - 10, 18, '#fff', 'center');
+    // オート攻撃
+    const o = BTN.auto;
+    blend(0.8); circ(o.x, o.y, o.r, autoAttack ? rgb(240, 200, 60) : rgb(60, 56, 70)); noblend();
+    text('AUTO', o.x, o.y - 9, 16, autoAttack ? rgb(40, 30, 0) : rgb(200, 200, 210), 'center', autoAttack ? rgb(255, 230, 140) : '#000');
+  },
+  drawSelect() {
+    blend(170 / 255); box(0, 0, W, H, rgb(0, 0, 10)); noblend();
+    const ty = this.selectTop();
+    text(this.fromChest ? 'たからばこ を あけた！' : 'レベルアップ！', W / 2, ty, portrait ? Math.min(56, W / 12) : 72,
+      this.fromChest ? rgb(255, 220, 80) : rgb(120, 255, 160), 'center');
+    text('スキルを ひとつ えらんでください', W / 2, ty + (portrait ? 76 : 92), 24, rgb(220, 220, 230), 'center');
+    const rects = this.cardRects();
+    rects.forEach((rc, i) => {
+      const sel = i === this.cursor && !touchUI;
+      const lift = sel ? -10 : 0, x = rc.x, y = rc.y + lift, id = this.choices[i];
+      const info = id === HEAL_CHOICE ? { n: 'やくそう', d: 'HPを ぜんかいふく する', c: [100, 255, 120], m: 0 } : SK[id];
+      const lv = id === HEAL_CHOICE ? 0 : player.lv(id);
+      const col = rgb(...info.c);
+      box(x, y, x + rc.w, y + rc.h, sel ? rgb(40, 40, 60) : rgb(26, 26, 38));
+      box(x, y, x + rc.w, y + 8, col);
+      boxS(x, y, x + rc.w, y + rc.h, sel ? '#fff' : rgb(90, 90, 110), sel ? 3 : 1);
+      if (portrait) {
+        text(info.n, x + 24, y + 24, 36, col);
+        if (id !== HEAL_CHOICE) {
+          text(lv === 0 ? 'NEW!' : `Lv ${lv} → ${lv + 1}`, x + rc.w - 24, y + 32, 24, lv === 0 ? rgb(255, 220, 80) : rgb(230, 230, 230), 'right');
+          for (let k = 0; k < info.m; k++) box(x + 24 + k * 22, y + 84, x + 40 + k * 22, y + 94, k < lv + 1 ? col : rgb(60, 60, 70));
+        }
+        text(info.d, x + 24, y + 116, 22, rgb(210, 210, 220));
+      } else {
+        text(info.n, x + 20, y + 30, 36, col);
+        if (id !== HEAL_CHOICE) {
+          text(lv === 0 ? 'NEW!' : `Lv ${lv} → ${lv + 1}`, x + 20, y + 90, 24, lv === 0 ? rgb(255, 220, 80) : rgb(230, 230, 230));
+          for (let k = 0; k < info.m; k++) box(x + 20 + k * 22, y + 126, x + 36 + k * 22, y + 136, k < lv + 1 ? col : rgb(60, 60, 70));
+        }
+        text(info.d, x + 20, y + 160, 18, rgb(210, 210, 220));
+      }
+    });
+    if (this.stT >= SELECT_DELAY) {
+      const last = rects[rects.length - 1];
+      const hint = touchUI ? 'カードを タップして けってい' : '← → でえらぶ   Z / Enter / クリック でけってい';
+      text(hint, W / 2, last.y + last.h + 30, 22, rgb(200, 200, 210), 'center');
+    }
+  },
+};
+
+function hitRect(p, r) { return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h; }
+function drawButton(r, label, col) {
+  box(r.x, r.y, r.x + r.w, r.y + r.h, rgb(30, 28, 42));
+  boxS(r.x, r.y, r.x + r.w, r.y + r.h, col, 2);
+  text(label, r.x + r.w / 2, r.y + 17, 28, col, 'center');
+}
+
+// ===========================================================================
+// タイトル → プレイ → リザルト
+// ===========================================================================
+function loadBest() { try { return parseInt(localStorage.getItem('smashrogue.best') || '0', 10) || 0; } catch (_) { return 0; } }
+function saveBest(v) { try { localStorage.setItem('smashrogue.best', String(v)); } catch (_) { /* 保存できなくても遊べる */ } }
+
+const Game = {
+  scene: 'title', timer: 0, best: loadBest(), result: null,
+  update() {
+    this.timer++;
+    if (this.scene === 'title') {
+      if (Input.trig('confirm') || taps.length) { Play.start(); this.scene = 'play'; }
+    } else if (this.scene === 'play') {
+      Play.update();
+      if (Play.quit) this.scene = 'title';
+      else if (Play.over) {
+        this.result = { floor: Play.floor, level: player.level, kills: Play.kills, frames: Play.frames };
+        if (this.result.floor > this.best) { this.best = this.result.floor; saveBest(this.best); }
+        this.scene = 'result'; this.timer = 0;
+        joy.id = null; atkPointer = null;
+      }
+    } else if (this.timer > 40 && (Input.trig('confirm') || taps.length)) {
+      this.scene = 'title';
+    }
+  },
+  draw() {
+    if (this.scene === 'title') this.drawTitle();
+    else if (this.scene === 'play') Play.draw();
+    else this.drawResult();
+  },
+  drawTitle() {
+    for (let y = 0; y < H; y += 8) {
+      const c = 10 + y * 30 / H;
+      box(0, y, W, y + 8, rgb(c, c / 2 + 6, c + 18));
+    }
+    const n = portrait ? 4 : 7, step = W / n, groundY = portrait ? H * 0.86 : Math.max(H * 0.85, H - 50);
+    for (let i = 0; i < n; i++) {
+      const x = step * (i + 0.5);
+      const hop = reduceMotion ? 0 : Math.max(0, Math.sin(this.timer * 0.08 + i * 1.3));
+      const y = groundY - hop * 40;
+      blend(90 / 255); oval(x, groundY + 18, 18, 6, '#000'); noblend();
+      oval(x, y, 20 + (1 - hop) * 3, 17, rgb(40, 110, 220));
+      tri(x - 6, y - 14, x + 6, y - 14, x + 1, y - 27, rgb(40, 110, 220));
+      circ(x - 5, y - 1, 2.6, rgb(20, 20, 30)); circ(x + 5, y - 1, 2.6, rgb(20, 20, 30));
+      oval(x, y + 6, 5, 2.5, rgb(200, 40, 60));
+    }
+    const top = portrait ? H * 0.2 : H < 700 ? 50 : 130;
+    text('スマッシュローグ', W / 2, top, Math.min(88, W / 9), rgb(255, 220, 100), 'center');
+    text('～ 斬って 育てて 深く もぐれ ～', W / 2, top + (portrait ? 100 : 110), 26, rgb(220, 220, 240), 'center');
+    if (((this.timer / 30) | 0) % 2 === 0) {
+      text(touchUI ? 'タップで スタート' : 'Z / Enter / クリック で スタート', W / 2, top + (portrait ? 190 : 190), 34, '#fff', 'center');
+    }
+    const lines = touchUI
+      ? ['いどう : 画面の左側をドラッグ', 'こうげき : 右下のボタン（AUTOで自動攻撃）', 'ダッシュ : 右下の小さいボタン（無敵）', 'かいだんに乗ると 次の階へ']
+      : ['いどう : WASD / 方向キー', 'こうげき : Z / J / 左クリック（おしっぱなしで連続）', 'ダッシュ : X / Space / 右クリック（無敵）', 'ポーズ : Esc / P'];
+    lines.forEach((l, i) => text(l, W / 2, top + 270 + i * 34, portrait ? 22 : 20, rgb(190, 200, 220), 'center'));
+    if (this.best > 0) text(`さいこう到達 : B${this.best}F`, 20, H - 40, 20, rgb(255, 230, 140));
+  },
+  drawResult() {
+    box(0, 0, W, H, rgb(20, 6, 10));
+    const r = this.result, top = portrait ? H * 0.2 : H < 700 ? 50 : 120;
+    text('ちからつきた…', W / 2, top, 72, rgb(255, 110, 100), 'center');
+    const rows = [
+      [`到達フロア   B${r.floor}F`, rgb(255, 230, 140)],
+      [`レベル   ${r.level}`, rgb(230, 230, 240)],
+      [`たおした数   ${r.kills}`, rgb(230, 230, 240)],
+      [`プレイ時間   ${Math.floor(r.frames / 3600)}:${String(Math.floor(r.frames / 60) % 60).padStart(2, '0')}`, rgb(230, 230, 240)],
+    ];
+    rows.forEach(([s, c], i) => text(s, W / 2, top + 140 + i * 62, 36, c, 'center'));
+    if (this.timer > 40 && ((this.timer / 30) | 0) % 2 === 0) {
+      text(touchUI ? 'タップで タイトルへ' : 'Z / Enter / クリック で タイトルへ', W / 2, top + 440, 26, '#fff', 'center');
+    }
+  },
+};
+
+// ===========================================================================
+// メインループ（60fps 固定ステップ）
+// ===========================================================================
+if (matchMedia('(pointer: coarse)').matches) { touchUI = true; autoAttack = true; }
+layout();
+let last = performance.now(), acc = 0;
+const STEP = 1000 / 60;
+function frame(now) {
+  acc += Math.min(250, now - last);
+  last = now;
+  let steps = 0;
+  while (acc >= STEP && steps < 5) {
+    Input.update();
+    Game.update();
+    taps = [];
+    acc -= STEP;
+    steps++;
+  }
+  if (steps === 5) acc = 0;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#0e0c14';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(S * DPR, 0, 0, S * DPR, OX * DPR, OY * DPR);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+  Game.draw();
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
