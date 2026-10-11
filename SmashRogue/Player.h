@@ -14,7 +14,8 @@ public:
 	void Reset();                          // 新しい冒険の開始
 	void PlaceForFloor(const Vec2& start); // フロア開始時
 	void Update(const Input& input, const Vec2* aimTarget);
-	void Draw(const Vec2& off) const;
+	void Draw3D() const;      // 3D 描画中に呼ぶ
+	void DrawOverlay() const; // 3D の後に重ねる UI
 
 	// 能力値（スキルレベルから算出）
 	int MaxHp() const;

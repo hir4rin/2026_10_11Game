@@ -8,6 +8,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int)
 	SetGraphMode(kScreenW, kScreenH, 32);
 	SetMainWindowText("スマッシュローグ");
 	SetWaitVSyncFlag(FALSE); // 60fps 固定は自前で行う
+	SetZBufferBitDepth(24);  // 床と影のちらつきを防ぐ（既定の 16bit では足りない）
 	if (DxLib_Init() == -1) return -1;
 	SetDrawScreen(DX_SCREEN_BACK);
 

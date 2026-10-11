@@ -1,5 +1,6 @@
 ﻿#include "PlayScene.h"
 #include "Input.h"
+#include "Render3D.h"
 #include "DxLib.h"
 #include <algorithm>
 #include <cstring>
@@ -25,15 +26,13 @@ const FloorTheme kThemes[] = {
 	{ { 66, 52, 80 }, { 72, 58, 88 }, { 36, 26, 46 } },   // 魔の城
 };
 
-unsigned int ThemeColor(const int c[3])
-{
-	return GetColor(c[0], c[1], c[2]);
-}
 }
 
 PlayScene::PlayScene(const Fonts& fonts)
 	: fonts_(fonts)
 {
+	r3d::Init();
+	r3d::FitCamera();
 }
 
 void PlayScene::Start()
@@ -64,6 +63,7 @@ void PlayScene::StartFloor(int floor)
 	effects_.Clear();
 
 	player_.PlaceForFloor(kArenaCenter);
+	r3d::FollowCamera(player_.pos, true);
 	bossFloor_ = (floor % 5 == 0);
 	GenerateObstacles();
 
@@ -88,7 +88,7 @@ void PlayScene::GenerateObstacles()
 		for (const auto& o : obstacles_) {
 			if ((o.pos - p).Length() < o.radius + r + 90.0f) overlap = true;
 		}
-		if (!overlap) obstacles_.push_back({ p, r });
+		if (!overlap) obstacles_.push_back({ p, r, RandF(0.0f, 3.0f) });
 	}
 }
 
@@ -149,7 +149,7 @@ void PlayScene::OpenStairs()
 {
 	stairsOpen_ = true;
 	stairsPos_ = RandomFreePos(40.0f, 200.0f);
-	effects_.Ring(stairsPos_, 120.0f, GetColor(255, 230, 120), 40);
+	effects_.Ring(stairsPos_, 120.0f, Rgb{ 255, 230, 120 }, 40);
 	effects_.Text(player_.pos + Vec2(0.0f, -50.0f), "かいだんが あらわれた！", GetColor(255, 230, 120), true);
 
 	// 残った経験値はすべて吸い寄せる
@@ -334,7 +334,7 @@ void PlayScene::UpdateSkills()
 			for (int i = 0; i < shots; ++i) {
 				float angle = baseAngle + (i - (shots - 1) * 0.5f) * 0.25f;
 				bullets_.push_back({ player_.pos, Vec2::FromAngle(angle) * 8.0f, 10.0f,
-					8 + fireLv * 5 + player_.AttackPower() / 3, 120, true, GetColor(255, 130, 40) });
+					8 + fireLv * 5 + player_.AttackPower() / 3, 120, true, Rgb{ 255, 130, 40 } });
 			}
 		}
 	}
@@ -372,14 +372,14 @@ void PlayScene::UpdateProjectiles()
 		if (b.pos.x < kArenaLeft || b.pos.x > kArenaRight || b.pos.y < kArenaTop || b.pos.y > kArenaBottom
 			|| HitsObstacle(b.pos, b.radius)) {
 			b.life = 0;
-			effects_.Burst(b.pos, b.color, 5, 3.0f, 4.0f, 14);
+			effects_.Burst(b.pos, ToColor(b.color), 5, 3.0f, 4.0f, 14);
 			continue;
 		}
 		if (b.fromPlayer) {
 			for (auto& e : enemies_) {
 				if (!e.IsActive() || (e.pos - b.pos).Length() > e.radius + b.radius) continue;
 				DamageEnemy(e, b.damage, b.vel.Normalized(), 5.0f, true);
-				effects_.Burst(b.pos, b.color, 10, 5.0f, 5.0f, 18);
+				effects_.Burst(b.pos, ToColor(b.color), 10, 5.0f, 5.0f, 18);
 				b.life = 0;
 				break;
 			}
@@ -520,7 +520,7 @@ void PlayScene::KillEnemy(Enemy& enemy)
 
 	if (enemy.isBoss) {
 		effects_.Shake(20.0f);
-		effects_.Ring(enemy.pos, 300.0f, GetColor(255, 200, 100), 50);
+		effects_.Ring(enemy.pos, 300.0f, Rgb{ 255, 200, 100 }, 50);
 		effects_.Text(enemy.pos + Vec2(0.0f, -80.0f), "ボスを たおした！", GetColor(255, 220, 100), true);
 		hitStop_ = 30;
 		// 手下も一緒に消える
@@ -560,7 +560,7 @@ void PlayScene::UpdatePickups()
 				if (ups > 0) {
 					pendingLevelUps_ += ups;
 					effects_.Text(player_.pos + Vec2(0.0f, -46.0f), "レベルアップ！", GetColor(120, 255, 160), true);
-					effects_.Ring(player_.pos, 90.0f, GetColor(120, 255, 160), 30);
+					effects_.Ring(player_.pos, 90.0f, Rgb{ 120, 255, 160 }, 30);
 				}
 				break;
 			}
@@ -574,7 +574,7 @@ void PlayScene::UpdatePickups()
 			case PickupKind::Chest:
 				++pendingChests_;
 				effects_.Burst(p.pos, GetColor(255, 220, 80), 30, 8.0f, 6.0f, 36);
-				effects_.Ring(p.pos, 100.0f, GetColor(255, 220, 80), 30);
+				effects_.Ring(p.pos, 100.0f, Rgb{ 255, 220, 80 }, 30);
 				break;
 			}
 		}
@@ -643,7 +643,7 @@ void PlayScene::UpdateSelect(const Input& input)
 		} else {
 			player_.LevelUpSkill(id);
 			const SkillInfo& info = GetSkillInfo(id);
-			effects_.Ring(player_.pos, 100.0f, GetColor(info.r, info.g, info.b), 30);
+			effects_.Ring(player_.pos, 100.0f, Rgb{ info.r, info.g, info.b }, 30);
 		}
 		state_ = State::Playing;
 		player_.Heal(player_.MaxHp() / 10); // レベルアップのおまけ回復
@@ -656,40 +656,36 @@ void PlayScene::UpdateSelect(const Input& input)
 
 void PlayScene::Draw() const
 {
-	const Vec2 off = effects_.ShakeOffset();
-
-	DrawFloor(off);
-	DrawPickups(off);
-
+	// ---- 3D の世界 ----
+	r3d::FollowCamera(player_.pos, false);
+	r3d::Begin(effects_.ShakeOffset());
+	DrawFloor();
+	DrawPickups();
 	for (const auto& w : shockwaves_) {
 		float t = w.radius / w.maxRadius;
-		SetDrawBlendMode(DX_BLENDMODE_ADD, static_cast<int>(230 * (1.0f - t)));
-		DrawCircleAA(w.pos.x + off.x, w.pos.y + off.y, w.radius, 64, GetColor(255, 160, 80), FALSE, 10.0f);
-		SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
+		r3d::GroundRing(w.pos, w.radius, std::max(8.0f, w.radius * 0.12f), { 255, 160, 80 }, static_cast<int>(230 * (1.0f - t)), true, 2.0f);
 	}
-
-	// y 座標順に並べて奥から描く
-	std::vector<const Enemy*> sorted;
-	for (const auto& e : enemies_) sorted.push_back(&e);
-	std::sort(sorted.begin(), sorted.end(), [](const Enemy* a, const Enemy* b) { return a->pos.y < b->pos.y; });
-	bool playerDrawn = state_ == State::Dying;
-	for (const Enemy* e : sorted) {
-		if (!playerDrawn && e->pos.y > player_.pos.y) {
-			player_.Draw(off);
-			playerDrawn = true;
-		}
-		e->Draw(off, fonts_.normal);
-	}
-	if (!playerDrawn) player_.Draw(off);
-
+	effects_.Draw3D();
+	for (const auto& e : enemies_) e.Draw3D(player_.pos);
+	if (state_ != State::Dying) player_.Draw3D();
 	for (const auto& b : bullets_) {
-		SetDrawBlendMode(DX_BLENDMODE_ADD, 160);
-		DrawCircleAA(b.pos.x + off.x, b.pos.y + off.y, b.radius + 5.0f, 16, b.color, TRUE);
-		SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-		DrawCircleAA(b.pos.x + off.x, b.pos.y + off.y, b.radius * 0.6f, 16, GetColor(255, 255, 230), TRUE);
+		const r3d::Pose pose{ b.pos };
+		r3d::Shadow(b.pos, b.radius * 0.7f);
+		r3d::Part(pose, r3d::Shape::Sphere, VGet(0.0f, 18.0f, 0.0f), VGet(b.radius * 0.6f, b.radius * 0.6f, b.radius * 0.6f), { 255, 255, 230 }, 1.0f);
+		r3d::Part(pose, r3d::Shape::Sphere, VGet(0.0f, 18.0f, 0.0f), VGet(b.radius + 5.0f, b.radius + 5.0f, b.radius + 5.0f),
+			b.color, 1.0f, r3d::Blend::Add, 150);
 	}
+	r3d::End();
 
-	effects_.Draw(off, fonts_.mini, fonts_.normal);
+	// ---- 世界に貼り付く文字やバー ----
+	if (stairsOpen_) {
+		const Vec2 s = r3d::Project(stairsPos_.x, 70.0f, stairsPos_.y);
+		DrawStringToHandle(static_cast<int>(s.x) - 40, static_cast<int>(s.y) - 30, "▼ つぎへ", GetColor(255, 230, 140), fonts_.mini, GetColor(30, 20, 0));
+	}
+	for (const auto& e : enemies_) e.DrawOverlay(fonts_.normal);
+	if (state_ != State::Dying) player_.DrawOverlay();
+	effects_.Draw2D(fonts_.mini, fonts_.normal);
+
 	DrawHud();
 
 	// フロア開始の表示
@@ -733,87 +729,95 @@ void PlayScene::Draw() const
 	}
 }
 
-void PlayScene::DrawFloor(const Vec2& off) const
+void PlayScene::DrawFloor() const
 {
+	using r3d::Shape;
 	const FloorTheme& theme = kThemes[((floor_ - 1) / 2) % (sizeof(kThemes) / sizeof(kThemes[0]))];
-	DrawBox(0, 0, kScreenW, kScreenH, GetColor(14, 12, 18), TRUE);
+	const Rgb ca{ theme.a[0], theme.a[1], theme.a[2] };
+	const Rgb cb{ theme.b[0], theme.b[1], theme.b[2] };
 
-	// 壁
-	const int wallW = 14;
-	DrawBox(static_cast<int>(kArenaLeft + off.x) - wallW, static_cast<int>(kArenaTop + off.y) - wallW,
-		static_cast<int>(kArenaRight + off.x) + wallW, static_cast<int>(kArenaBottom + off.y) + wallW, ThemeColor(theme.wall), TRUE);
-
-	// 床のタイル
-	const int tile = 48;
-	const unsigned int ca = ThemeColor(theme.a);
-	const unsigned int cb = ThemeColor(theme.b);
-	for (int y = static_cast<int>(kArenaTop); y < kArenaBottom; y += tile) {
-		for (int x = static_cast<int>(kArenaLeft); x < kArenaRight; x += tile) {
-			int tx = (x - static_cast<int>(kArenaLeft)) / tile;
-			int ty = (y - static_cast<int>(kArenaTop)) / tile;
-			int x2 = std::min(x + tile, static_cast<int>(kArenaRight));
-			int y2 = std::min(y + tile, static_cast<int>(kArenaBottom));
-			DrawBox(x + static_cast<int>(off.x), y + static_cast<int>(off.y), x2 + static_cast<int>(off.x), y2 + static_cast<int>(off.y),
-				(tx + ty) % 2 == 0 ? ca : cb, TRUE);
+	// 床（市松模様）と、外側の暗い地面
+	static std::vector<VERTEX3D> verts;
+	verts.clear();
+	const float tile = 48.0f;
+	int ty = 0;
+	for (float y = kArenaTop; y < kArenaBottom; y += tile, ++ty) {
+		int tx = 0;
+		for (float x = kArenaLeft; x < kArenaRight; x += tile, ++tx) {
+			r3d::PushQuad(verts, x, y, std::min(x + tile, kArenaRight), std::min(y + tile, kArenaBottom), 0.0f, (tx + ty) % 2 == 0 ? ca : cb);
 		}
 	}
+	r3d::PushQuad(verts, kArenaLeft - 2000.0f, kArenaTop - 2000.0f, kArenaRight + 2000.0f, kArenaBottom + 2000.0f, -6.0f, { 20, 18, 26 });
+	r3d::DrawTriangles(verts);
 
-	// 階段
+	// 壁
+	const Rgb wall{ std::min(255, theme.wall[0] * 17 / 10), std::min(255, theme.wall[1] * 17 / 10), std::min(255, theme.wall[2] * 17 / 10) };
+	const float wh = 34.0f, t = 14.0f, aw = kArenaRight - kArenaLeft, ah = kArenaBottom - kArenaTop;
+	const Vec2 c((kArenaLeft + kArenaRight) * 0.5f, (kArenaTop + kArenaBottom) * 0.5f);
+	const struct { Vec2 pos; float w, d; } walls[] = {
+		{ { c.x, kArenaTop - t * 0.5f }, aw + t * 2.0f, t },
+		{ { c.x, kArenaBottom + t * 0.5f }, aw + t * 2.0f, t },
+		{ { kArenaLeft - t * 0.5f, c.y }, t, ah },
+		{ { kArenaRight + t * 0.5f, c.y }, t, ah },
+	};
+	for (const auto& w : walls) {
+		r3d::Part({ w.pos }, Shape::Box, VGet(0.0f, wh * 0.5f, 0.0f), VGet(w.w, wh, w.d), wall);
+	}
+
+	// 階段：穴と段、光の柱
 	if (stairsOpen_) {
-		const Vec2 s = stairsPos_ + off;
+		const r3d::Pose pose{ stairsPos_ };
 		float pulse = (std::sin(frames_ * 0.1f) + 1.0f) * 0.5f;
-		SetDrawBlendMode(DX_BLENDMODE_ADD, static_cast<int>(80 + 80 * pulse));
-		DrawCircleAA(s.x, s.y, 46.0f + pulse * 6.0f, 32, GetColor(255, 220, 120), TRUE);
-		SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-		DrawBoxAA(s.x - 28, s.y - 28, s.x + 28, s.y + 28, GetColor(20, 16, 14), TRUE);
+		r3d::GroundDisc(stairsPos_, 46.0f + pulse * 8.0f, { 255, 220, 120 }, static_cast<int>(80 + 80 * pulse), true, 0.5f);
+		r3d::Part(pose, Shape::Box, VGet(0.0f, 1.0f, 0.0f), VGet(60.0f, 2.0f, 60.0f), { 20, 16, 14 });
 		for (int i = 0; i < 4; ++i) {
-			float y = s.y - 24 + i * 13.0f;
-			DrawBoxAA(s.x - 24 + i * 4.0f, y, s.x + 24 - i * 4.0f, y + 6, GetColor(110 - i * 20, 100 - i * 20, 90 - i * 18), TRUE);
+			r3d::Part(pose, Shape::Box, VGet(0.0f, 2.2f, 21.0f - i * 13.0f), VGet(48.0f - i * 8.0f, 2.0f, 9.0f),
+				{ 110 - i * 20, 100 - i * 20, 90 - i * 18 });
 		}
-		DrawStringToHandle(static_cast<int>(s.x) - 40, static_cast<int>(s.y) - 56, "▼ つぎへ", GetColor(255, 230, 140), fonts_.mini, GetColor(30, 20, 0));
+		r3d::Part(pose, Shape::Cylinder, VGet(0.0f, 80.0f, 0.0f), VGet(30.0f, 160.0f, 30.0f), { 255, 230, 160 },
+			1.0f, r3d::Blend::Add, static_cast<int>(25 + 25 * pulse));
 	}
 
 	// 岩
 	for (const auto& o : obstacles_) {
-		const Vec2 p = o.pos + off;
-		SetDrawBlendMode(DX_BLENDMODE_ALPHA, 100);
-		DrawOvalAA(p.x + 6, p.y + o.radius * 0.6f, o.radius, o.radius * 0.45f, 32, GetColor(0, 0, 0), TRUE);
-		SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-		DrawCircleAA(p.x, p.y, o.radius, 40, GetColor(70, 66, 72), TRUE);
-		DrawCircleAA(p.x - o.radius * 0.15f, p.y - o.radius * 0.15f, o.radius * 0.8f, 40, GetColor(110, 106, 112), TRUE);
-		DrawCircleAA(p.x - o.radius * 0.35f, p.y - o.radius * 0.35f, o.radius * 0.25f, 20, GetColor(150, 146, 152), TRUE);
+		const r3d::Pose pose{ o.pos };
+		r3d::Shadow(o.pos + Vec2(6.0f, 4.0f), o.radius * 1.05f);
+		r3d::Part(pose, Shape::Ico, VGet(0.0f, o.radius * 0.55f, 0.0f), VGet(o.radius, o.radius * 0.85f, o.radius), { 122, 118, 128 },
+			0.0f, r3d::Blend::Opaque, 255, VGet(o.tilt, o.tilt * 1.7f, o.tilt * 0.6f));
+		r3d::Part(pose, Shape::Ico, VGet(o.radius * 0.62f, o.radius * 0.18f, -o.radius * 0.42f), VGet(o.radius * 0.4f, o.radius * 0.36f, o.radius * 0.4f),
+			{ 122, 118, 128 }, 0.0f, r3d::Blend::Opaque, 255, VGet(o.tilt * 2.0f, o.tilt, 0.0f));
 	}
 }
 
-void PlayScene::DrawPickups(const Vec2& off) const
+void PlayScene::DrawPickups() const
 {
+	using r3d::Shape;
 	for (const auto& p : pickups_) {
-		const Vec2 q = p.pos + off;
+		const r3d::Pose pose{ p.pos };
 		switch (p.kind) {
 		case PickupKind::Exp: {
 			float s = 4.0f + p.value;
-			unsigned int col = p.value >= 5 ? GetColor(120, 255, 140) : GetColor(100, 200, 255);
-			SetDrawBlendMode(DX_BLENDMODE_ADD, 110);
-			DrawCircleAA(q.x, q.y, s + 4.0f, 12, col, TRUE);
-			SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-			DrawTriangleAA(q.x, q.y - s, q.x + s * 0.7f, q.y, q.x - s * 0.7f, q.y, col, TRUE);
-			DrawTriangleAA(q.x, q.y + s, q.x + s * 0.7f, q.y, q.x - s * 0.7f, q.y, col, TRUE);
+			Rgb col = p.value >= 5 ? Rgb{ 120, 255, 140 } : Rgb{ 100, 200, 255 };
+			float bob = std::sin((frames_ + p.pos.x) * 0.1f) * 3.0f;
+			r3d::Shadow(p.pos, s * 0.7f);
+			r3d::Part(pose, Shape::Octa, VGet(0.0f, 12.0f + bob, 0.0f), VGet(s * 0.75f, s * 1.2f, s * 0.75f), col, 0.5f,
+				r3d::Blend::Opaque, 255, VGet(0.0f, frames_ * 0.06f + p.pos.y, 0.0f));
 			break;
 		}
 		case PickupKind::Herb:
-			DrawOvalAA(q.x - 5, q.y, 6.0f, 10.0f, 16, GetColor(60, 200, 80), TRUE);
-			DrawOvalAA(q.x + 5, q.y, 6.0f, 10.0f, 16, GetColor(80, 230, 100), TRUE);
-			DrawLineAA(q.x, q.y + 4, q.x, q.y + 14, GetColor(60, 140, 50), 2.0f);
+			r3d::Shadow(p.pos, 9.0f);
+			r3d::Part(pose, Shape::Sphere, VGet(-5.0f, 6.0f, 0.0f), VGet(5.0f, 3.0f, 10.0f), { 80, 210, 100 }, 0.0f, r3d::Blend::Opaque, 255, VGet(0.0f, -0.5f, 0.0f));
+			r3d::Part(pose, Shape::Sphere, VGet(5.0f, 6.0f, 0.0f), VGet(5.0f, 3.0f, 10.0f), { 80, 210, 100 }, 0.0f, r3d::Blend::Opaque, 255, VGet(0.0f, 0.5f, 0.0f));
+			r3d::Part(pose, Shape::Cylinder, VGet(0.0f, 5.0f, -3.0f), VGet(1.0f, 10.0f, 1.0f), { 60, 140, 50 });
 			break;
 		case PickupKind::Chest: {
-			float bob = std::sin(frames_ * 0.08f) * 3.0f;
-			SetDrawBlendMode(DX_BLENDMODE_ADD, 90);
-			DrawCircleAA(q.x, q.y, 34.0f, 24, GetColor(255, 220, 80), TRUE);
-			SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-			DrawBoxAA(q.x - 20, q.y - 12 + bob, q.x + 20, q.y + 14 + bob, GetColor(150, 80, 30), TRUE);
-			DrawBoxAA(q.x - 20, q.y - 16 + bob, q.x + 20, q.y - 4 + bob, GetColor(190, 110, 40), TRUE);
-			DrawBoxAA(q.x - 20, q.y - 5 + bob, q.x + 20, q.y - 2 + bob, GetColor(240, 200, 60), TRUE);
-			DrawBoxAA(q.x - 4, q.y - 8 + bob, q.x + 4, q.y + 4 + bob, GetColor(250, 220, 80), TRUE);
+			float pulse = std::sin(frames_ * 0.08f);
+			r3d::GroundDisc(p.pos, 36.0f, { 255, 220, 80 }, static_cast<int>(70 + 40 * pulse), true, 0.8f);
+			r3d::Shadow(p.pos, 24.0f);
+			r3d::Part(pose, Shape::Box, VGet(0.0f, 11.0f, 0.0f), VGet(40.0f, 22.0f, 26.0f), { 150, 80, 32 });
+			r3d::Part(pose, Shape::Box, VGet(0.0f, 26.0f, 0.0f), VGet(42.0f, 9.0f, 28.0f), { 190, 110, 40 });
+			r3d::Part(pose, Shape::Box, VGet(0.0f, 22.0f, 0.0f), VGet(43.0f, 3.0f, 29.0f), { 240, 200, 60 }, 0.3f);
+			r3d::Part(pose, Shape::Box, VGet(0.0f, 18.0f, 14.0f), VGet(8.0f, 10.0f, 2.0f), { 250, 220, 80 }, 0.3f);
 			break;
 		}
 		}

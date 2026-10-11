@@ -1,5 +1,6 @@
 ﻿#include "Enemy.h"
 #include "Effect.h"
+#include "Render3D.h"
 #include "DxLib.h"
 #include <algorithm>
 
@@ -24,9 +25,9 @@ BaseStats GetBaseStats(EnemyType type)
 	return { 16.0f, 10, 5, 1.0f, 1 };
 }
 
-unsigned int Flash(bool flash, int r, int g, int b)
+Rgb Mix(const Rgb& a, const Rgb& b, float t)
 {
-	return flash ? GetColor(255, 255, 255) : GetColor(r, g, b);
+	return { static_cast<int>(a.r + (b.r - a.r) * t), static_cast<int>(a.g + (b.g - a.g) * t), static_cast<int>(a.b + (b.b - a.b) * t) };
 }
 }
 
@@ -96,7 +97,7 @@ void Enemy::Update(EnemyWorld& world)
 
 		if (++aiTimer_ >= 120) {
 			aiTimer_ = 0;
-			world.bullets.push_back({ pos + dir * radius, dir * 4.2f, 8.0f, attack, 240, false, GetColor(200, 90, 255) });
+			world.bullets.push_back({ pos + dir * radius, dir * 4.2f, 8.0f, attack, 240, false, Rgb{ 200, 90, 255 } });
 		}
 		break;
 	}
@@ -166,7 +167,7 @@ void Enemy::UpdateGolem(EnemyWorld& world, const Vec2& dir)
 			const float baseAngle = seed_ + burstCount_ * 0.2f;
 			for (int i = 0; i < count; ++i) {
 				Vec2 d = Vec2::FromAngle(baseAngle + kPi * 2.0f * i / count);
-				world.bullets.push_back({ pos + d * radius, d * 3.4f, 10.0f, attack * 2 / 3, 300, false, GetColor(255, 150, 60) });
+				world.bullets.push_back({ pos + d * radius, d * 3.4f, 10.0f, attack * 2 / 3, 300, false, Rgb{ 255, 150, 60 } });
 			}
 			if (++burstCount_ < (enraged ? 3 : 2)) {
 				stateTimer_ = 22;
@@ -183,123 +184,137 @@ void Enemy::UpdateGolem(EnemyWorld& world, const Vec2& dir)
 	}
 }
 
-void Enemy::Draw(const Vec2& off, int font) const
+float Enemy::TopHeight() const
 {
-	const Vec2 p = pos + off;
-
-	if (spawnTimer > 0) {
-		// 出現前の魔法陣
-		float t = 1.0f - static_cast<float>(spawnTimer) / (isBoss ? 90 : 45);
-		SetDrawBlendMode(DX_BLENDMODE_ADD, static_cast<int>(200 * t));
-		DrawCircleAA(p.x, p.y, radius * (1.6f - t * 0.6f), 32, GetColor(200, 80, 255), FALSE, 3.0f);
-		DrawCircleAA(p.x, p.y, radius * 0.6f * t, 32, GetColor(160, 60, 220), TRUE);
-		SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-		if (t < 0.6f) return;
-		SetDrawBlendMode(DX_BLENDMODE_ALPHA, static_cast<int>(255 * (t - 0.6f) / 0.4f));
+	switch (type) {
+	case EnemyType::Slime:  return radius * 2.0f + 14.0f;
+	case EnemyType::Bat:    return 58.0f;
+	case EnemyType::Mage:   return 74.0f;
+	case EnemyType::Knight: return 66.0f;
+	case EnemyType::Golem:  return radius * 2.0f + 18.0f;
 	}
+	return radius * 2.0f;
+}
 
-	// 影
-	if (spawnTimer <= 0) SetDrawBlendMode(DX_BLENDMODE_ALPHA, 90);
-	DrawOvalAA(p.x, p.y + radius * 0.85f, radius * 0.9f, radius * 0.35f, 24, GetColor(0, 0, 0), TRUE);
-	if (spawnTimer <= 0) SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
+void Enemy::Draw3D(const Vec2& playerPos) const
+{
+	using r3d::Shape;
+	Vec2 forward = (playerPos - pos).Normalized();
+	if (forward.LengthSq() == 0.0f) forward = Vec2(0.0f, 1.0f);
 
-	DrawBody(p, hitFlash > 4);
-	SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
+	// 出現前は魔法陣から大きくなって出てくる
+	float s = 1.0f;
+	if (spawnTimer > 0) {
+		float t = 1.0f - static_cast<float>(spawnTimer) / (isBoss ? 90 : 45);
+		r3d::GroundRing(pos, radius * (1.6f - t * 0.6f), radius * 0.25f, { 200, 80, 255 }, static_cast<int>(220 * t), true, 1.5f);
+		if (t < 0.6f) return;
+		s = (t - 0.6f) / 0.4f;
+	}
+	r3d::Shadow(pos, radius * 0.95f * s);
+
+	// 色合い：被弾で白、溜め中は赤や橙に光る
+	const bool white = hitFlash > 4;
+	float glow = 0.0f;
+	Rgb glowColor{};
+	if (!white && type == EnemyType::Knight && aiState_ == 1 && (static_cast<int>(anim_) / 3) % 2 == 0) {
+		glow = 0.55f;
+		glowColor = { 255, 50, 30 };
+	}
+	if (!white && type == EnemyType::Golem && (aiState_ == 1 || aiState_ == 2)) {
+		glow = 0.3f + 0.2f * std::sin(anim_ * 0.5f);
+		glowColor = { 255, 120, 40 };
+	}
+	auto P = [&](Shape shape, float x, float y, float z, float sx, float sy, float sz, Rgb c, float e = 0.0f) {
+		Rgb col = white ? Rgb{ 255, 255, 255 } : (glow > 0.0f ? Mix(c, glowColor, glow) : c);
+		float em = white ? 1.0f : std::max(e, glow * 0.6f);
+		r3d::Part({ pos, forward }, shape, VGet(x * s, y * s, z * s), VGet(sx * s, sy * s, sz * s), col, em);
+	};
+	const Rgb black{ 20, 20, 32 };
+
+	switch (type) {
+	case EnemyType::Slime: {
+		float hop = std::max(0.0f, std::sin(anim_ * 0.12f + seed_));
+		float squash = 1.0f - hop, lift = hop * 12.0f;
+		float rx = radius * (1.0f + 0.18f * squash), ry = radius * (0.95f - 0.12f * squash);
+		const Rgb body{ 40, 112, 220 };
+		P(Shape::Sphere, 0.0f, ry + lift, 0.0f, rx, ry, rx, body);
+		P(Shape::Cone, 0.0f, ry * 2.0f + lift + 3.0f, 0.0f, 5.0f, 11.0f, 5.0f, body);
+		P(Shape::Sphere, -rx * 0.35f, ry * 1.55f + lift, rx * 0.1f, 4.0f, 2.5f, 3.0f, { 230, 240, 255 }, 0.8f);
+		for (float x : { -5.0f, 5.0f }) P(Shape::Sphere, x, ry + lift + 2.0f, rx * 0.93f, 2.6f, 3.0f, 1.5f, black);
+		P(Shape::Sphere, 0.0f, ry + lift - 5.0f, rx * 0.93f, 5.0f, 2.5f, 1.5f, { 200, 40, 60 });
+		break;
+	}
+	case EnemyType::Bat: {
+		float fly = 32.0f + std::sin(anim_ * 0.1f) * 4.0f;
+		float flap = std::sin(anim_ * 0.5f) * 0.7f;
+		const Rgb body{ 120, 74, 170 }, wing{ 90, 50, 130 };
+		P(Shape::Sphere, 0.0f, fly, 0.0f, radius, radius, radius, body);
+		for (float x : { -6.0f, 6.0f }) P(Shape::Cone, x, fly + radius + 2.0f, 0.0f, 3.5f, 9.0f, 3.5f, body);
+		for (float x : { -4.0f, 4.0f }) P(Shape::Sphere, x, fly + 2.0f, radius - 1.0f, 2.4f, 2.4f, 1.5f, { 255, 60, 60 }, 0.8f);
+		for (float side : { -1.0f, 1.0f }) {
+			float cx = side * (radius - 3.0f + 12.0f * std::cos(flap));
+			float cy = fly + 12.0f * std::sin(flap);
+			Rgb col = white ? Rgb{ 255, 255, 255 } : wing;
+			r3d::Part({ pos, forward }, Shape::Box, VGet(cx * s, cy * s, 0.0f), VGet(24.0f * s, 1.5f * s, 18.0f * s), col,
+				white ? 1.0f : 0.0f, r3d::Blend::Opaque, 255, VGet(0.0f, 0.0f, side * flap));
+		}
+		break;
+	}
+	case EnemyType::Mage: {
+		const Rgb robe{ 70, 40, 110 }, hat{ 110, 50, 170 };
+		P(Shape::Cone, 0.0f, 16.0f, 0.0f, 16.0f, 32.0f, 16.0f, robe);
+		P(Shape::Sphere, 0.0f, 36.0f, 0.0f, 9.0f, 9.0f, 9.0f, { 230, 200, 170 });
+		P(Shape::Cylinder, 0.0f, 43.0f, 0.0f, 14.0f, 2.0f, 14.0f, hat);
+		P(Shape::Cone, 0.0f, 56.0f, 0.0f, 12.0f, 26.0f, 12.0f, hat);
+		for (float x : { -3.5f, 3.5f }) P(Shape::Sphere, x, 37.0f, 8.3f, 1.8f, 1.8f, 1.0f, black);
+		P(Shape::Cylinder, 16.0f, 23.0f, 4.0f, 1.6f, 46.0f, 1.6f, { 150, 100, 60 });
+		const bool casting = aiTimer_ > 85;
+		const float orb = casting ? 7.0f + std::sin(anim_ * 0.6f) * 2.0f : 4.0f;
+		P(Shape::Sphere, 16.0f, 49.0f, 4.0f, orb, orb, orb, { 220, 120, 255 }, 0.7f);
+		if (casting) {
+			r3d::Part({ pos, forward }, Shape::Sphere, VGet(16.0f, 49.0f, 4.0f), VGet(orb * 2.0f, orb * 2.0f, orb * 2.0f),
+				{ 200, 80, 255 }, 1.0f, r3d::Blend::Add, 110);
+		}
+		break;
+	}
+	case EnemyType::Knight:
+		P(Shape::Cylinder, 0.0f, 14.0f, 0.0f, radius, 28.0f, radius, { 140, 145, 158 });
+		P(Shape::Sphere, 0.0f, 36.0f, 0.0f, radius - 3.0f, radius - 3.0f, radius - 3.0f, { 180, 185, 200 });
+		P(Shape::Box, 0.0f, 38.0f, radius - 5.0f, 14.0f, 3.0f, 4.0f, black);
+		P(Shape::Cone, 0.0f, 58.0f, 0.0f, 4.0f, 14.0f, 4.0f, { 200, 50, 50 });
+		P(Shape::Box, -(radius + 2.0f), 18.0f, 2.0f, 4.0f, 24.0f, 18.0f, { 140, 100, 50 });
+		break;
+	case EnemyType::Golem: {
+		const Rgb rock{ 140, 125, 105 }, dark{ 110, 100, 85 };
+		const float swing = std::sin(anim_ * 0.08f) * 6.0f;
+		P(Shape::Ico1, 0.0f, radius * 0.95f, 0.0f, radius, radius * 0.95f, radius * 0.9f, rock);
+		P(Shape::Ico, -24.0f, radius * 1.65f, 6.0f, 13.0f, 11.0f, 13.0f, dark);
+		P(Shape::Ico, 22.0f, radius * 1.55f, -10.0f, 10.0f, 9.0f, 10.0f, dark);
+		P(Shape::Ico, -(radius + 10.0f), 26.0f + swing, 4.0f, 17.0f, 20.0f, 17.0f, dark);
+		P(Shape::Ico, radius + 10.0f, 26.0f - swing, 4.0f, 17.0f, 20.0f, 17.0f, dark);
+		const Rgb eye = hp < maxHp / 2 ? Rgb{ 255, 60, 40 } : Rgb{ 255, 180, 60 };
+		for (float x : { -14.0f, 14.0f }) P(Shape::Box, x, radius * 1.15f, radius * 0.82f, 12.0f, 6.0f, 4.0f, eye, 0.9f);
+		break;
+	}
+	}
+}
+
+void Enemy::DrawOverlay(int font) const
+{
+	if (spawnTimer > 0) return;
+	const Vec2 top = r3d::Project(pos.x, TopHeight(), pos.y);
 
 	// 小さな HP バー（ボスは HUD に出す）
-	if (!isBoss && hp < maxHp && spawnTimer <= 0) {
-		float ratio = static_cast<float>(hp) / maxHp;
-		float w = radius * 2.0f;
-		float y = p.y - radius - 10.0f;
-		DrawBoxAA(p.x - w / 2, y, p.x + w / 2, y + 4, GetColor(40, 20, 20), TRUE);
-		DrawBoxAA(p.x - w / 2, y, p.x - w / 2 + w * ratio, y + 4, GetColor(240, 70, 60), TRUE);
+	if (!isBoss && hp < maxHp) {
+		float ratio = static_cast<float>(std::max(0, hp)) / maxHp;
+		float w = std::max(28.0f, radius * 2.0f);
+		DrawBoxAA(top.x - w / 2, top.y - 10, top.x + w / 2, top.y - 5, GetColor(40, 20, 20), TRUE);
+		DrawBoxAA(top.x - w / 2, top.y - 10, top.x - w / 2 + w * ratio, top.y - 5, GetColor(240, 70, 60), TRUE);
 	}
 
 	// 溜め中の「！」
 	if ((type == EnemyType::Knight && aiState_ == 1) || (type == EnemyType::Golem && (aiState_ == 1 || aiState_ == 2))) {
-		DrawStringToHandle(static_cast<int>(p.x) - 6, static_cast<int>(p.y - radius) - 36, "！",
+		DrawStringToHandle(static_cast<int>(top.x) - 6, static_cast<int>(top.y) - 44, "！",
 			GetColor(255, 80, 60), font, GetColor(40, 0, 0));
-	}
-}
-
-void Enemy::DrawBody(const Vec2& p, bool flash) const
-{
-	switch (type) {
-	case EnemyType::Slime: {
-		float hop = std::max(0.0f, std::sin(anim_ * 0.12f + seed_));
-		float y = p.y - hop * 10.0f;
-		float squash = 1.0f - hop;
-		float rx = radius * (1.0f + 0.18f * squash);
-		float ry = radius * (0.95f - 0.12f * squash);
-		DrawOvalAA(p.x, y, rx, ry, 32, Flash(flash, 40, 110, 220), TRUE);
-		DrawTriangleAA(p.x - 6, y - ry + 4, p.x + 6, y - ry + 4, p.x + 1, y - ry - 9, Flash(flash, 40, 110, 220), TRUE);
-		DrawOvalAA(p.x - rx * 0.4f, y - ry * 0.4f, 4.0f, 2.5f, 12, GetColor(220, 240, 255), TRUE);
-		DrawCircleAA(p.x - 5, y - 1, 2.6f, 10, GetColor(20, 20, 30), TRUE);
-		DrawCircleAA(p.x + 5, y - 1, 2.6f, 10, GetColor(20, 20, 30), TRUE);
-		DrawOvalAA(p.x, y + 6, 5.0f, 2.5f, 12, GetColor(200, 40, 60), TRUE);
-		break;
-	}
-	case EnemyType::Bat: {
-		float flap = std::sin(anim_ * 0.5f) * 9.0f;
-		unsigned int wing = Flash(flash, 90, 50, 130);
-		DrawTriangleAA(p.x - 4, p.y, p.x - 26, p.y - 8 + flap, p.x - 14, p.y + 8, wing, TRUE);
-		DrawTriangleAA(p.x + 4, p.y, p.x + 26, p.y - 8 + flap, p.x + 14, p.y + 8, wing, TRUE);
-		DrawCircleAA(p.x, p.y, radius, 24, Flash(flash, 120, 70, 170), TRUE);
-		DrawTriangleAA(p.x - 9, p.y - 8, p.x - 4, p.y - 10, p.x - 8, p.y - 18, Flash(flash, 120, 70, 170), TRUE);
-		DrawTriangleAA(p.x + 9, p.y - 8, p.x + 4, p.y - 10, p.x + 8, p.y - 18, Flash(flash, 120, 70, 170), TRUE);
-		DrawCircleAA(p.x - 4, p.y - 2, 2.5f, 8, GetColor(255, 60, 60), TRUE);
-		DrawCircleAA(p.x + 4, p.y - 2, 2.5f, 8, GetColor(255, 60, 60), TRUE);
-		break;
-	}
-	case EnemyType::Mage: {
-		DrawTriangleAA(p.x, p.y - 12, p.x - 16, p.y + 16, p.x + 16, p.y + 16, Flash(flash, 70, 40, 110), TRUE);
-		DrawCircleAA(p.x, p.y - 6, 9.0f, 20, Flash(flash, 230, 200, 170), TRUE);
-		DrawTriangleAA(p.x - 13, p.y - 10, p.x + 13, p.y - 10, p.x + 4, p.y - 34, Flash(flash, 110, 50, 170), TRUE);
-		DrawCircleAA(p.x - 3, p.y - 6, 1.8f, 8, GetColor(20, 20, 30), TRUE);
-		DrawCircleAA(p.x + 3, p.y - 6, 1.8f, 8, GetColor(20, 20, 30), TRUE);
-		// 杖。詠唱中は光る
-		DrawLineAA(p.x + 16, p.y - 16, p.x + 16, p.y + 16, GetColor(150, 100, 60), 3.0f);
-		bool casting = aiTimer_ > 85;
-		if (casting) SetDrawBlendMode(DX_BLENDMODE_ADD, 200);
-		DrawCircleAA(p.x + 16, p.y - 18, casting ? 7.0f + std::sin(anim_ * 0.6f) * 2.0f : 4.0f, 16, GetColor(220, 120, 255), TRUE);
-		SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-		break;
-	}
-	case EnemyType::Knight: {
-		bool windup = aiState_ == 1;
-		if (windup && (static_cast<int>(anim_) / 3) % 2 == 0) {
-			SetDrawBlendMode(DX_BLENDMODE_ADD, 160);
-			DrawCircleAA(p.x, p.y, radius + 6.0f, 32, GetColor(255, 60, 40), TRUE);
-			SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-		}
-		DrawCircleAA(p.x, p.y, radius, 32, Flash(flash, 90, 95, 110), TRUE);
-		DrawCircleAA(p.x, p.y - 3, radius - 5.0f, 32, Flash(flash, 160, 165, 180), TRUE);
-		DrawBoxAA(p.x - 10, p.y - 6, p.x + 10, p.y - 2, GetColor(20, 20, 30), TRUE);
-		DrawTriangleAA(p.x - 4, p.y - radius - 2, p.x + 4, p.y - radius - 2, p.x, p.y - radius - 14, GetColor(200, 50, 50), TRUE);
-		// 盾
-		DrawBoxAA(p.x - radius - 6, p.y - 6, p.x - radius + 4, p.y + 12, Flash(flash, 140, 100, 50), TRUE);
-		break;
-	}
-	case EnemyType::Golem: {
-		bool windup = aiState_ == 1 || aiState_ == 2;
-		if (windup) {
-			SetDrawBlendMode(DX_BLENDMODE_ADD, 100 + static_cast<int>(std::sin(anim_ * 0.5f) * 60));
-			DrawCircleAA(p.x, p.y, radius + 10.0f, 48, GetColor(255, 120, 40), TRUE);
-			SetDrawBlendMode(DX_BLENDMODE_NOBLEND, 0);
-		}
-		DrawCircleAA(p.x, p.y, radius, 48, Flash(flash, 90, 80, 70), TRUE);
-		DrawCircleAA(p.x - 4, p.y - 4, radius - 7.0f, 48, Flash(flash, 140, 125, 105), TRUE);
-		DrawCircleAA(p.x - 22, p.y + 16, 9.0f, 16, Flash(flash, 110, 100, 85), TRUE);
-		DrawCircleAA(p.x + 20, p.y - 22, 7.0f, 16, Flash(flash, 110, 100, 85), TRUE);
-		DrawCircleAA(p.x + 26, p.y + 18, 6.0f, 16, Flash(flash, 110, 100, 85), TRUE);
-		unsigned int eye = hp < maxHp / 2 ? GetColor(255, 60, 40) : GetColor(255, 180, 60);
-		DrawBoxAA(p.x - 22, p.y - 12, p.x - 8, p.y - 5, eye, TRUE);
-		DrawBoxAA(p.x + 8, p.y - 12, p.x + 22, p.y - 5, eye, TRUE);
-		// 腕
-		float swing = std::sin(anim_ * 0.08f) * 6.0f;
-		DrawCircleAA(p.x - radius - 8, p.y + 10 + swing, 16.0f, 24, Flash(flash, 110, 100, 85), TRUE);
-		DrawCircleAA(p.x + radius + 8, p.y + 10 - swing, 16.0f, 24, Flash(flash, 110, 100, 85), TRUE);
-		break;
-	}
 	}
 }

@@ -41,6 +41,7 @@ private:
 	struct Obstacle {
 		Vec2 pos;
 		float radius;
+		float tilt; // 岩の見た目の傾き
 	};
 
 	enum class PickupKind { Exp, Herb, Chest };
@@ -84,8 +85,8 @@ private:
 	const Enemy* FindNearestEnemy(const Vec2& from, float maxDist) const;
 
 	// 描画
-	void DrawFloor(const Vec2& off) const;
-	void DrawPickups(const Vec2& off) const;
+	void DrawFloor() const;
+	void DrawPickups() const;
 	void DrawHud() const;
 	void DrawSelect() const;
 	void DrawCentered(const char* text, int y, unsigned int color, int font) const;

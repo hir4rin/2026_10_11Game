@@ -89,6 +89,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Player.cpp" />
     <ClCompile Include="PlayScene.cpp" />
+    <ClCompile Include="Render3D.cpp" />
     <ClCompile Include="Skill.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -99,6 +100,7 @@
     <ClInclude Include="Input.h" />
     <ClInclude Include="Player.h" />
     <ClInclude Include="PlayScene.h" />
+    <ClInclude Include="Render3D.h" />
     <ClInclude Include="Skill.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

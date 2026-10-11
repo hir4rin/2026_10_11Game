@@ -19,7 +19,7 @@ struct Projectile {
 	int damage;
 	int life;
 	bool fromPlayer;
-	unsigned int color;
+	Rgb color;
 };
 
 // ボスの地面たたきで広がる衝撃波
@@ -46,7 +46,8 @@ public:
 	Enemy(EnemyType type, const Vec2& pos, int floor);
 
 	void Update(EnemyWorld& world);
-	void Draw(const Vec2& off, int font) const;
+	void Draw3D(const Vec2& playerPos) const; // 3D 描画中に呼ぶ
+	void DrawOverlay(int font) const;         // HP バーなど、3D の後に重ねる
 
 	bool IsActive() const { return alive && spawnTimer <= 0; }
 	bool IsCharging() const { return type == EnemyType::Knight && aiState_ == 2; }
@@ -72,7 +73,7 @@ public:
 
 private:
 	void UpdateGolem(EnemyWorld& world, const Vec2& dir);
-	void DrawBody(const Vec2& p, bool flash) const;
+	float TopHeight() const; // 頭の上の高さ（HP バーの位置）
 
 	float anim_ = 0.0f;
 	float seed_ = 0.0f;

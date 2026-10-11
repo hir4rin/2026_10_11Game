@@ -40,6 +40,12 @@ struct Vec2 {
 	static Vec2 FromAngle(float rad) { return { std::cos(rad), std::sin(rad) }; }
 };
 
+struct Rgb {
+	int r = 255;
+	int g = 255;
+	int b = 255;
+};
+
 // 乱数
 float RandF(float lo, float hi);
 int RandI(int lo, int hi); // lo 以上 hi 以下

@@ -23,10 +23,13 @@ body {
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
 }
-#cv { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+/* 下に 3D（WebGL）、上に HUD・文字・ボタン用の 2D を重ねる */
+#gl, #cv { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
 #cv:focus-visible { outline: 2px solid #ffdc64; outline-offset: -2px; }
 </style>
+<canvas id="gl" aria-hidden="true"></canvas>
 <canvas id="cv" tabindex="0" aria-label="スマッシュローグのゲーム画面"></canvas>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 'use strict';
 // ===========================================================================
@@ -96,6 +99,7 @@ function layout() {
   BTN.auto = { x: BTN.atk.x + 10, y: BTN.atk.y - BTN.atk.r - 46, r: 32 };
   BTN.pause = { x: W - 34, y: 30, r: 26 };
   if (typeof Play !== 'undefined' && Play.enemies) Play.clampWorld();
+  if (typeof V !== 'undefined') V.layout(vw, vh);
 }
 
 // ===========================================================================
@@ -254,8 +258,12 @@ const HEAL_CHOICE = -1;
 const fx = {
   clear() { this.parts = []; this.texts = []; this.rings = []; this.bolts = []; this.shake = 0; this.sx = 0; this.sy = 0; },
   update() {
-    for (const p of this.parts) { p.x += p.vx; p.y += p.vy; p.vx *= 0.9; p.vy *= 0.9; p.life--; }
-    for (const t of this.texts) { t.y -= t.life > 30 ? 1.2 : 0.3; t.life--; }
+    for (const p of this.parts) {
+      p.x += p.vx; p.y += p.vy; p.vx *= 0.9; p.vy *= 0.9;
+      p.h += p.vh; p.vh -= 0.35; if (p.h < 2) { p.h = 2; p.vh *= -0.4; }
+      p.life--;
+    }
+    for (const t of this.texts) { t.rise += t.life > 30 ? 1.2 : 0.3; t.life--; }
     for (const r of this.rings) r.life--;
     for (const b of this.bolts) b.life--;
     const alive = e => e.life > 0;
@@ -268,48 +276,38 @@ const fx = {
     const s = reduceMotion ? 0 : this.shake;
     this.sx = rnd(-s, s); this.sy = rnd(-s, s);
   },
+  // 雷とダメージ数字は 3D 座標を画面へ投影して 2D で描く（粒子と輪は 3D 側で描く）
   draw() {
-    for (const r of this.rings) {
-      const t = 1 - r.life / r.max;
-      blend(1 - t, true);
-      ringS(r.x, r.y, r.R * (0.2 + 0.8 * t), r.c, 4);
-    }
     for (const b of this.bolts) {
       blend(Math.min(1, b.life * 30 / 255), true);
-      for (let i = 1; i < b.pts.length; i++) {
-        const a = b.pts[i - 1], c = b.pts[i];
-        line(a[0], a[1], c[0], c[1], rgb(255, 240, 120), 8);
-        line(a[0], a[1], c[0], c[1], '#fff', 3);
+      const pts = b.pts.map(p => V.proj(p[0], p[1], p[2]));
+      for (let i = 1; i < pts.length; i++) {
+        line(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, rgb(255, 240, 120), 8);
+        line(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, '#fff', 3);
       }
-    }
-    for (const p of this.parts) {
-      const t = p.life / p.max;
-      blend(t, false);
-      circ(p.x, p.y, Math.max(0.5, p.size * t), p.c);
     }
     noblend();
     for (const t of this.texts) {
+      const p = V.proj(t.x, 40, t.y);
       blend(Math.min(1, t.life * 12 / 255), false);
-      text(t.s, t.x, t.y, t.big ? 26 : 18, t.c, 'center', '#14141e');
+      text(t.s, p.x, p.y - t.rise, t.big ? 26 : 18, t.c, 'center', '#14141e');
     }
     noblend();
   },
   burst(x, y, c, count, speed, size, life) {
     for (let i = 0; i < count; i++) {
       const a = rnd(0, TAU), v = rnd(speed * 0.3, speed), l = rndI(life >> 1, life);
-      this.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, c, size: rnd(size * 0.5, size), life: l, max: l });
+      this.parts.push({ x, y, h: 16, vx: Math.cos(a) * v, vy: Math.sin(a) * v, vh: rnd(1, speed * 0.8), c, size: rnd(size * 0.5, size), life: l, max: l });
     }
   },
-  text(x, y, s, c, big = false) { this.texts.push({ x: x + rnd(-8, 8), y, s, c, life: big ? 60 : 42, big }); },
+  text(x, y, s, c, big = false) { this.texts.push({ x: x + rnd(-8, 8), y, rise: 0, s, c, life: big ? 60 : 42, big }); },
   ring(x, y, R, c, life) { this.rings.push({ x, y, R, c, life, max: life }); },
   lightning(x, y) {
-    const sx = x + rnd(-40, 40), sy = A.t - 30, pts = [];
+    // 空から地面へジグザグに落ちる（[x, 高さ, y]）
+    const pts = [];
     for (let i = 0; i <= 8; i++) {
-      const t = i / 8;
-      let qx = sx + (x - sx) * t;
-      const qy = sy + (y - sy) * t;
-      if (i !== 0 && i !== 8) qx += rnd(-22, 22);
-      pts.push([qx, qy]);
+      const t = i / 8, j = i !== 0 && i !== 8 ? 22 : 0;
+      pts.push([x + rnd(-j, j), 420 * (1 - t), y + rnd(-j, j)]);
     }
     this.bolts.push({ pts, life: 14 });
     this.ring(x, y, 70, rgb(255, 240, 120), 18);
@@ -413,59 +411,6 @@ const player = {
     this.x += this.kx; this.y += this.ky;
     this.kx *= 0.78; this.ky *= 0.78;
   },
-  draw() {
-    const x = this.x, y = this.y;
-    blend(90 / 255); oval(x, y + PR * 0.85, PR * 0.9, PR * 0.35, '#000');
-    for (let i = 1; i < this.trail.length; i++) {
-      blend((120 - i * 18) / 255, true);
-      circ(this.trail[i][0], this.trail[i][1], PR, rgb(80, 160, 255));
-    }
-    noblend();
-
-    if (this.swing > 0) {
-      const t = 1 - this.swing / SWING;
-      const ease = 1 - (1 - t) * (1 - t);
-      const arc = this.spin ? TAU : this.arc();
-      const start = this.swingA - arc / 2;
-      const cur = start + arc * Math.min(1, ease * 1.25);
-      blend(140 / 255 * (1 - t), true);
-      fan(x, y, this.range(), start, cur, this.spin ? rgb(200, 140, 255) : '#fff');
-      noblend();
-      const dx = Math.cos(cur), dy = Math.sin(cur);
-      line(x + dx * PR, y + dy * PR, x + dx * this.range() * 0.92, y + dy * this.range() * 0.92, rgb(220, 230, 240), 6);
-      line(x + dx * PR, y + dy * PR, x + dx * this.range() * 0.92, y + dy * this.range() * 0.92, '#fff', 2);
-    }
-
-    const blink = this.inv > 0 && this.dash === 0 && ((this.frame / 3) | 0) % 2 === 0;
-    blend(blink ? 90 / 255 : 1);
-    circ(x, y, PR, rgb(30, 60, 140));
-    circ(x, y, PR - 2.5, rgb(70, 130, 240));
-    const ty = y - PR + 2;
-    tri(x - 7, ty + 2, x + 7, ty + 2, x + 3, ty - 10, rgb(250, 210, 70));
-    const sx = -this.fy, sy = this.fx;
-    const ex = x + this.fx * 7, ey = y + this.fy * 7;
-    for (const s of [5, -5]) {
-      circ(ex + sx * s, ey + sy * s, 3.2, '#fff');
-      circ(ex + sx * s + this.fx, ey + sy * s + this.fy, 1.8, rgb(20, 20, 40));
-    }
-    if (this.swing === 0) {
-      const hx = x + sx * (PR - 2), hy = y + sy * (PR - 2);
-      line(hx, hy, hx + this.fx * 22 + sx * 4, hy + this.fy * 22 + sy * 4, rgb(220, 230, 240), 4);
-    }
-    noblend();
-
-    for (let i = 0; i < this.orbCount(); i++) {
-      const [ox, oy] = this.orbPos(i);
-      blend(120 / 255, true); circ(ox, oy, ORB_R + 6, rgb(80, 140, 255)); noblend();
-      circ(ox, oy, ORB_R, rgb(190, 230, 255));
-    }
-
-    if (this.dashCdT > 0) {
-      const ratio = 1 - this.dashCdT / this.dashCd();
-      box(x - 18, y + 26, x + 18, y + 30, rgb(30, 30, 40));
-      box(x - 18, y + 26, x - 18 + 36 * ratio, y + 30, rgb(100, 255, 180));
-    }
-  },
 };
 
 // ===========================================================================
@@ -478,7 +423,6 @@ const ENEMY_BASE = {
   knight: { r: 20, hp: 55,  atk: 14, sp: 1.0, exp: 6,  name: 'よろいのきし' },
   golem:  { r: 50, hp: 500, atk: 18, sp: 0.9, exp: 60, name: 'ストーンゴーレム' },
 };
-const flash = (f, r, g, b) => (f ? '#fff' : rgb(r, g, b));
 
 class Enemy {
   constructor(type, x, y, floor) {
@@ -579,90 +523,6 @@ class Enemy {
       case 3:
         if (--this.stT <= 0) this.st = 0;
         break;
-    }
-  }
-  draw() {
-    const x = this.x, y = this.y, r = this.r;
-    let a = 1;
-    if (this.spawn > 0) {
-      const t = 1 - this.spawn / (this.boss ? 90 : 45);
-      blend(200 / 255 * t, true);
-      ringS(x, y, r * (1.6 - t * 0.6), rgb(200, 80, 255), 3);
-      circ(x, y, r * 0.6 * t, rgb(160, 60, 220));
-      noblend();
-      if (t < 0.6) return;
-      a = (t - 0.6) / 0.4;
-    }
-    blend(a * 90 / 255); oval(x, y + r * 0.85, r * 0.9, r * 0.35, '#000');
-    blend(a);
-    this.drawBody(x, y, this.hitFlash > 4, a);
-    noblend();
-    if (!this.boss && this.hp < this.maxHp && this.spawn <= 0) {
-      const w = r * 2, by = y - r - 10;
-      box(x - w / 2, by, x + w / 2, by + 4, rgb(40, 20, 20));
-      box(x - w / 2, by, x - w / 2 + w * Math.max(0, this.hp / this.maxHp), by + 4, rgb(240, 70, 60));
-    }
-    if ((this.type === 'knight' && this.st === 1) || (this.boss && (this.st === 1 || this.st === 2))) {
-      text('！', x, y - r - 40, 26, rgb(255, 80, 60), 'center', rgb(40, 0, 0));
-    }
-  }
-  drawBody(x, y, f, a) {
-    const an = this.anim, r = this.r;
-    switch (this.type) {
-      case 'slime': {
-        const hop = Math.max(0, Math.sin(an * 0.12 + this.seed)), yy = y - hop * 10, sq = 1 - hop;
-        const rx = r * (1 + 0.18 * sq), ry = r * (0.95 - 0.12 * sq);
-        oval(x, yy, rx, ry, flash(f, 40, 110, 220));
-        tri(x - 6, yy - ry + 4, x + 6, yy - ry + 4, x + 1, yy - ry - 9, flash(f, 40, 110, 220));
-        oval(x - rx * 0.4, yy - ry * 0.4, 4, 2.5, rgb(220, 240, 255));
-        circ(x - 5, yy - 1, 2.6, rgb(20, 20, 30)); circ(x + 5, yy - 1, 2.6, rgb(20, 20, 30));
-        oval(x, yy + 6, 5, 2.5, rgb(200, 40, 60));
-        break;
-      }
-      case 'bat': {
-        const fl = Math.sin(an * 0.5) * 9, wing = flash(f, 90, 50, 130), body = flash(f, 120, 70, 170);
-        tri(x - 4, y, x - 26, y - 8 + fl, x - 14, y + 8, wing);
-        tri(x + 4, y, x + 26, y - 8 + fl, x + 14, y + 8, wing);
-        circ(x, y, r, body);
-        tri(x - 9, y - 8, x - 4, y - 10, x - 8, y - 18, body);
-        tri(x + 9, y - 8, x + 4, y - 10, x + 8, y - 18, body);
-        circ(x - 4, y - 2, 2.5, rgb(255, 60, 60)); circ(x + 4, y - 2, 2.5, rgb(255, 60, 60));
-        break;
-      }
-      case 'mage': {
-        tri(x, y - 12, x - 16, y + 16, x + 16, y + 16, flash(f, 70, 40, 110));
-        circ(x, y - 6, 9, flash(f, 230, 200, 170));
-        tri(x - 13, y - 10, x + 13, y - 10, x + 4, y - 34, flash(f, 110, 50, 170));
-        circ(x - 3, y - 6, 1.8, rgb(20, 20, 30)); circ(x + 3, y - 6, 1.8, rgb(20, 20, 30));
-        line(x + 16, y - 16, x + 16, y + 16, rgb(150, 100, 60), 3);
-        const casting = this.aiT > 85;
-        if (casting) blend(a * 200 / 255, true);
-        circ(x + 16, y - 18, casting ? 7 + Math.sin(an * 0.6) * 2 : 4, rgb(220, 120, 255));
-        blend(a);
-        break;
-      }
-      case 'knight': {
-        if (this.st === 1 && ((an / 3) | 0) % 2 === 0) { blend(a * 160 / 255, true); circ(x, y, r + 6, rgb(255, 60, 40)); blend(a); }
-        circ(x, y, r, flash(f, 90, 95, 110));
-        circ(x, y - 3, r - 5, flash(f, 160, 165, 180));
-        box(x - 10, y - 6, x + 10, y - 2, rgb(20, 20, 30));
-        tri(x - 4, y - r - 2, x + 4, y - r - 2, x, y - r - 14, rgb(200, 50, 50));
-        box(x - r - 6, y - 6, x - r + 4, y + 12, flash(f, 140, 100, 50));
-        break;
-      }
-      case 'golem': {
-        if (this.st === 1 || this.st === 2) { blend(a * (100 + Math.sin(an * 0.5) * 60) / 255, true); circ(x, y, r + 10, rgb(255, 120, 40)); blend(a); }
-        const rock = flash(f, 110, 100, 85);
-        const sw = Math.sin(an * 0.08) * 6;
-        circ(x - r - 8, y + 10 + sw, 16, rock);
-        circ(x + r + 8, y + 10 - sw, 16, rock);
-        circ(x, y, r, flash(f, 90, 80, 70));
-        circ(x - 4, y - 4, r - 7, flash(f, 140, 125, 105));
-        circ(x - 22, y + 16, 9, rock); circ(x + 20, y - 22, 7, rock); circ(x + 26, y + 18, 6, rock);
-        const eye = this.hp < this.maxHp / 2 ? rgb(255, 60, 40) : rgb(255, 180, 60);
-        box(x - 22, y - 12, x - 8, y - 5, eye); box(x + 8, y - 12, x + 22, y - 5, eye);
-        break;
-      }
     }
   }
 }
@@ -1120,29 +980,31 @@ const Play = {
   },
 
   // ---------------------------------------------------------------- 描画
+  // 3D の世界は V.render() が描く。ここでは世界に貼り付く文字やバーと HUD を重ねる
   draw() {
-    ctx.save();
-    ctx.translate(fx.sx, fx.sy);
-    this.drawFloor();
-    this.drawPickups();
-    for (const w of this.waves) {
-      blend(230 / 255 * (1 - w.r / w.max), true);
-      ringS(w.x, w.y, w.r, rgb(255, 160, 80), 10);
+    if (!V.ok) text('この端末では 3D 表示（WebGL）が使えません', W / 2, H / 2, 24, '#fff', 'center');
+    if (this.stairs) {
+      const p = V.proj(this.stairs.x, 70, this.stairs.y);
+      text('▼ つぎへ', p.x, p.y - 26, 18, rgb(255, 230, 140), 'center', rgb(30, 20, 0));
     }
-    noblend();
-    const sorted = [...this.enemies].sort((a, b) => a.y - b.y);
-    let drawn = this.state === 'dying';
-    for (const e of sorted) {
-      if (!drawn && e.y > player.y) { player.draw(); drawn = true; }
-      e.draw();
+    for (const e of this.enemies) {
+      if (e.spawn > 0) continue;
+      const top = V.proj(e.x, enemyTop(e), e.y);
+      if (!e.boss && e.hp < e.maxHp) {
+        const w = Math.max(28, e.r * 2);
+        box(top.x - w / 2, top.y - 10, top.x + w / 2, top.y - 5, rgb(40, 20, 20));
+        box(top.x - w / 2, top.y - 10, top.x - w / 2 + w * Math.max(0, e.hp / e.maxHp), top.y - 5, rgb(240, 70, 60));
+      }
+      if ((e.type === 'knight' && e.st === 1) || (e.boss && (e.st === 1 || e.st === 2))) {
+        text('！', top.x, top.y - 44, 26, rgb(255, 80, 60), 'center', rgb(40, 0, 0));
+      }
     }
-    if (!drawn) player.draw();
-    for (const b of this.bullets) {
-      blend(160 / 255, true); circ(b.x, b.y, b.r + 5, b.c); noblend();
-      circ(b.x, b.y, b.r * 0.6, rgb(255, 255, 230));
+    if (player.dashCdT > 0 && this.state !== 'dying') {
+      const p = V.proj(player.x, 0, player.y), ratio = 1 - player.dashCdT / player.dashCd();
+      box(p.x - 18, p.y + 10, p.x + 18, p.y + 14, rgb(30, 30, 40));
+      box(p.x - 18, p.y + 10, p.x - 18 + 36 * ratio, p.y + 14, rgb(100, 255, 180));
     }
     fx.draw();
-    ctx.restore();
 
     this.drawHud();
     if (touchUI && (this.state === 'playing' || this.state === 'transition')) this.drawTouchControls();
@@ -1167,54 +1029,6 @@ const Play = {
       blend(a); box(0, 0, W, H, '#000'); noblend();
     } else if (this.state === 'dying') {
       blend(200 / 255 * this.stT / DYING); box(0, 0, W, H, rgb(60, 0, 0)); noblend();
-    }
-  },
-  drawFloor() {
-    const th = THEMES[Math.floor((this.floor - 1) / 2) % THEMES.length];
-    box(-40, -40, W + 40, H + 40, rgb(14, 12, 18));
-    box(A.l - 14, A.t - 14, A.r + 14, A.b + 14, rgb(...th.w));
-    const tile = 48, ca = rgb(...th.a), cb = rgb(...th.b);
-    for (let y = A.t, ty = 0; y < A.b; y += tile, ty++) {
-      for (let x = A.l, tx = 0; x < A.r; x += tile, tx++) {
-        box(x, y, Math.min(x + tile, A.r), Math.min(y + tile, A.b), (tx + ty) % 2 ? cb : ca);
-      }
-    }
-    if (this.stairs) {
-      const { x, y } = this.stairs, pulse = (Math.sin(this.frames * 0.1) + 1) / 2;
-      blend((80 + 80 * pulse) / 255, true); circ(x, y, 46 + pulse * 6, rgb(255, 220, 120)); noblend();
-      box(x - 28, y - 28, x + 28, y + 28, rgb(20, 16, 14));
-      for (let i = 0; i < 4; i++) {
-        const sy = y - 24 + i * 13;
-        box(x - 24 + i * 4, sy, x + 24 - i * 4, sy + 6, rgb(110 - i * 20, 100 - i * 20, 90 - i * 18));
-      }
-      text('▼ つぎへ', x, y - 58, 18, rgb(255, 230, 140), 'center', rgb(30, 20, 0));
-    }
-    for (const o of this.obs) {
-      blend(100 / 255); oval(o.x + 6, o.y + o.r * 0.6, o.r, o.r * 0.45, '#000'); noblend();
-      circ(o.x, o.y, o.r, rgb(70, 66, 72));
-      circ(o.x - o.r * 0.15, o.y - o.r * 0.15, o.r * 0.8, rgb(110, 106, 112));
-      circ(o.x - o.r * 0.35, o.y - o.r * 0.35, o.r * 0.25, rgb(150, 146, 152));
-    }
-  },
-  drawPickups() {
-    for (const p of this.pickups) {
-      if (p.kind === 'exp') {
-        const s = 4 + p.v, c = p.v >= 5 ? rgb(120, 255, 140) : rgb(100, 200, 255);
-        blend(110 / 255, true); circ(p.x, p.y, s + 4, c); noblend();
-        tri(p.x, p.y - s, p.x + s * 0.7, p.y, p.x - s * 0.7, p.y, c);
-        tri(p.x, p.y + s, p.x + s * 0.7, p.y, p.x - s * 0.7, p.y, c);
-      } else if (p.kind === 'herb') {
-        oval(p.x - 5, p.y, 6, 10, rgb(60, 200, 80));
-        oval(p.x + 5, p.y, 6, 10, rgb(80, 230, 100));
-        line(p.x, p.y + 4, p.x, p.y + 14, rgb(60, 140, 50), 2);
-      } else {
-        const bob = Math.sin(this.frames * 0.08) * 3, x = p.x, y = p.y;
-        blend(90 / 255, true); circ(x, y, 34, rgb(255, 220, 80)); noblend();
-        box(x - 20, y - 12 + bob, x + 20, y + 14 + bob, rgb(150, 80, 30));
-        box(x - 20, y - 16 + bob, x + 20, y - 4 + bob, rgb(190, 110, 40));
-        box(x - 20, y - 5 + bob, x + 20, y - 2 + bob, rgb(240, 200, 60));
-        box(x - 4, y - 8 + bob, x + 4, y + 4 + bob, rgb(250, 220, 80));
-      }
     }
   },
   drawHud() {
@@ -1436,9 +1250,651 @@ const Game = {
 };
 
 // ===========================================================================
+// 3D 描画（Three.js）。ゲームの (x, y) を地面の (x, z) に置き、高さを y にする
+// ===========================================================================
+function enemyTop(e) {
+  switch (e.type) {
+    case 'slime': return e.r * 2 + 14;
+    case 'bat': return 58;
+    case 'mage': return 74;
+    case 'knight': return 66;
+    default: return e.r * 2 + 18;
+  }
+}
+
+const V = {
+  ok: false,
+  R: { x: 0, y: 0, w: 1, h: 1 },
+  cssW: 1, cssH: 1,
+
+  init() {
+    if (!window.THREE) return;
+    try {
+      this.renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('gl'), antialias: true });
+    } catch (_) { return; } // WebGL が使えない環境
+    const r = this.renderer;
+    r.setClearColor(0x0e0c14, 1);
+    r.autoClear = false;
+    r.shadowMap.enabled = true;
+    r.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(34, 1, 20, 9000);
+    this.scene.add(new THREE.HemisphereLight(0xdde4ff, 0x40342c, 0.75));
+    const sun = new THREE.DirectionalLight(0xfff0d8, 0.85);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.bias = -0.0008;
+    this.sun = sun;
+    this.scene.add(sun, sun.target);
+    this.world = new THREE.Group(); // 床・壁（フロアごとに作り直す）
+    this.dyn = new THREE.Group();   // キャラ・アイテム・演出
+    this.scene.add(this.world, this.dyn);
+    this.ents = new Map();
+    this.fid = 0;
+    this.v3 = new THREE.Vector3();
+
+    const wing = new THREE.BufferGeometry();
+    wing.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, -0.5, 0.8, 0, 0.5], 3));
+    wing.computeVertexNormals();
+    this.G = {
+      sphere: new THREE.SphereGeometry(1, 20, 14),
+      cone: new THREE.ConeGeometry(1, 1, 18),
+      cyl: new THREE.CylinderGeometry(1, 1, 1, 18),
+      box: new THREE.BoxGeometry(1, 1, 1),
+      ico: new THREE.IcosahedronGeometry(1, 0),
+      ico1: new THREE.IcosahedronGeometry(1, 1),
+      oct: new THREE.OctahedronGeometry(1, 0),
+      ring: new THREE.RingGeometry(0.86, 1, 56).rotateX(-Math.PI / 2),
+      disc: new THREE.CircleGeometry(1, 40).rotateX(-Math.PI / 2),
+      wing,
+    };
+
+    // 粒子（加算合成の点。色を暗くしていくとフェードアウトして見える）
+    this.MAXP = 900;
+    const pg = new THREE.BufferGeometry();
+    pg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.MAXP * 3), 3));
+    pg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(this.MAXP * 3), 3));
+    const dot = document.createElement('canvas');
+    dot.width = dot.height = 32;
+    const dc = dot.getContext('2d'), gr = dc.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gr.addColorStop(0, 'rgba(255,255,255,1)');
+    gr.addColorStop(0.5, 'rgba(255,255,255,0.55)');
+    gr.addColorStop(1, 'rgba(255,255,255,0)');
+    dc.fillStyle = gr;
+    dc.fillRect(0, 0, 32, 32);
+    this.points = new THREE.Points(pg, new THREE.PointsMaterial({
+      size: 10, map: new THREE.CanvasTexture(dot), vertexColors: true,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    this.points.frustumCulled = false;
+    this.scene.add(this.points);
+    this.ok = true;
+  },
+
+  layout(vw, vh) {
+    if (!this.ok) return;
+    this.cssW = vw;
+    this.cssH = vh;
+    this.renderer.setPixelRatio(DPR);
+    this.renderer.setSize(vw, vh, false);
+    // HUD の下（縦画面ならボタン帯の上）までが 3D の表示範囲
+    const bottom = portrait && touchUI ? A.b + 20 : H;
+    this.R = { x: 0, y: hudH + 1, w: W, h: bottom - hudH - 1 };
+    this.fit();
+    this.floorKey = '';
+  },
+
+  // 斜め上から見下ろす固定カメラ。エリア全体がちょうど収まる距離を二分探索で決める
+  fit() {
+    const cam = this.camera, v = this.v3;
+    cam.aspect = this.R.w / this.R.h;
+    const cx = (A.l + A.r) / 2, cz = (A.t + A.b) / 2;
+    const pitch = portrait ? 1.08 : 0.98;
+    const pts = [];
+    for (const x of [A.l - 14, A.r + 14]) for (const z of [A.t - 14, A.b + 14]) for (const y of [0, 34]) pts.push([x, y, z]);
+    const measure = d => {
+      cam.position.set(cx, Math.sin(pitch) * d, cz + Math.cos(pitch) * d);
+      cam.lookAt(cx, 0, cz);
+      cam.updateProjectionMatrix();
+      cam.updateMatrixWorld();
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, behind = false;
+      for (const p of pts) {
+        v.set(p[0], p[1], p[2]).project(cam);
+        if (v.z > 1 || v.z < -1) behind = true;
+        x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x);
+        y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
+      }
+      return { x0, x1, y0, y1, behind };
+    };
+    let lo = 100, hi = 9000;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2, m = measure(mid);
+      if (!m.behind && m.x1 - m.x0 <= 1.94 && m.y1 - m.y0 <= 1.94) hi = mid; else lo = mid;
+    }
+    const m = measure(hi);
+    // 広いエリアは全体を映すとキャラが小さいので、寄ってプレイヤーを追いかける
+    const k = portrait ? Math.min(1, 780 / (A.b - A.t)) : Math.min(1, 860 / (A.r - A.l));
+    const whole = k > 0.999;
+    // 全体を映すときは、奥が小さく映るぶんのずれをレンズシフトで中央に寄せる
+    this.cam = { cx, cz, pitch, k, d: hi * k, tx: cx, tz: cz, sx: whole ? -(m.x0 + m.x1) / 2 : 0, sy: whole ? -(m.y0 + m.y1) / 2 : 0 };
+    this.follow(true);
+    this.applyCamera(0, 0);
+  },
+
+  follow(snap = false) {
+    const c = this.cam;
+    if (c.k > 0.999 || typeof player.x !== 'number') { c.tx = c.cx; c.tz = c.cz; return; }
+    const mx = (A.r - A.l) / 2 * (1 - c.k) + 20, mz = (A.b - A.t) / 2 * (1 - c.k) + 20;
+    const gx = clamp(player.x, c.cx - mx, c.cx + mx), gz = clamp(player.y, c.cz - mz, c.cz + mz);
+    const t = snap ? 1 : 0.12;
+    c.tx += (gx - c.tx) * t;
+    c.tz += (gz - c.tz) * t;
+  },
+
+  applyCamera(shx, shy) {
+    const c = this.cam, cam = this.camera;
+    cam.position.set(c.tx + shx, Math.sin(c.pitch) * c.d, c.tz + Math.cos(c.pitch) * c.d + shy);
+    cam.lookAt(c.tx + shx, 0, c.tz + shy);
+    cam.updateProjectionMatrix();
+    const e = cam.projectionMatrix.elements;
+    e[8] -= c.sx;
+    e[9] -= c.sy;
+    cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+    cam.updateMatrixWorld();
+  },
+
+  // 3D の点を 2D レイヤーの座標へ
+  proj(x, h, y) {
+    if (!this.ok) return { x, y };
+    this.v3.set(x, h, y).project(this.camera);
+    return { x: this.R.x + (this.v3.x + 1) / 2 * this.R.w, y: this.R.y + (1 - this.v3.y) / 2 * this.R.h };
+  },
+
+  render() {
+    if (!this.ok) return;
+    const r = this.renderer;
+    r.setScissorTest(false);
+    r.setViewport(0, 0, this.cssW, this.cssH);
+    r.clear();
+    if (Game.scene !== 'play') return;
+    const newFloor = this.syncFloor();
+    this.sync();
+    this.follow(newFloor);
+    this.applyCamera(fx.sx, fx.sy);
+    const R = this.R, x = OX + R.x * S, y = OY + R.y * S, w = R.w * S, h = R.h * S, by = this.cssH - y - h;
+    r.setViewport(x, by, w, h);
+    r.setScissor(x, by, w, h);
+    r.setScissorTest(true);
+    r.render(this.scene, this.camera);
+  },
+
+  // ---------------------------------------------------------------- 部品づくり
+  newObj() {
+    const root = new THREE.Group(), body = new THREE.Group();
+    root.add(body);
+    return { root, body, mats: [], flash: [] };
+  },
+  mat(o, color, opts = {}) {
+    const m = new THREE.MeshPhongMaterial({ color, shininess: 24, ...opts });
+    m.userData.base = m.emissive.getHex();
+    o.mats.push(m);
+    return m;
+  },
+  glow(o, color, opacity) {
+    const m = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false });
+    o.mats.push(m);
+    return m;
+  },
+  part(o, geo, m, s, p, parent = null, cast = true) {
+    const mesh = new THREE.Mesh(geo, m);
+    mesh.scale.set(s[0], s[1], s[2]);
+    mesh.position.set(p[0], p[1], p[2]);
+    mesh.castShadow = cast;
+    (parent || o.body).add(mesh);
+    return mesh;
+  },
+  setFlash(o, hex) {
+    for (const m of o.flash) m.emissive.setHex(hex === null ? m.userData.base : hex);
+  },
+
+  // ---------------------------------------------------------------- 床と壁
+  syncFloor() {
+    const key = `${Play.floor}|${A.l}|${A.t}|${A.r}|${A.b}`;
+    if (key === this.floorKey) return false;
+    this.floorKey = key;
+    for (const c of [...this.world.children]) {
+      this.world.remove(c);
+      c.geometry.dispose();
+      if (c.material.map) c.material.map.dispose();
+      c.material.dispose();
+    }
+    const th = THEMES[Math.floor((Play.floor - 1) / 2) % THEMES.length];
+    const aw = A.r - A.l, ah = A.b - A.t, cx = (A.l + A.r) / 2, cz = (A.t + A.b) / 2;
+
+    // 市松模様（1マス 48）。2x2 ピクセルのテクスチャを並べる
+    const tc = document.createElement('canvas');
+    tc.width = tc.height = 2;
+    const t2 = tc.getContext('2d');
+    t2.fillStyle = rgb(...th.a); t2.fillRect(0, 0, 2, 2);
+    t2.fillStyle = rgb(...th.b); t2.fillRect(1, 0, 1, 1); t2.fillRect(0, 1, 1, 1);
+    const tex = new THREE.CanvasTexture(tc);
+    tex.magFilter = tex.minFilter = THREE.NearestFilter;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(aw / 96, ah / 96);
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(aw, ah).rotateX(-Math.PI / 2), new THREE.MeshPhongMaterial({ map: tex, shininess: 4 }));
+    floor.position.set(cx, 0, cz);
+    floor.receiveShadow = true;
+    this.world.add(floor);
+
+    const wallColor = new THREE.Color(rgb(...th.w)).multiplyScalar(1.7);
+    const wh = 34, t = 14;
+    const walls = [
+      [cx, cz - ah / 2 - t / 2, aw + t * 2, t], [cx, cz + ah / 2 + t / 2, aw + t * 2, t],
+      [cx - aw / 2 - t / 2, cz, t, ah], [cx + aw / 2 + t / 2, cz, t, ah],
+    ];
+    for (const [x, z, w, d] of walls) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, wh, d), new THREE.MeshPhongMaterial({ color: wallColor, shininess: 6 }));
+      m.position.set(x, wh / 2, z);
+      m.castShadow = m.receiveShadow = true;
+      this.world.add(m);
+    }
+
+    // 光は左奥から。影は手前右に落ちる
+    const span = Math.max(aw, ah) * 0.75 + 80;
+    this.sun.position.set(cx - span * 0.45, span * 1.6, cz - span * 0.35);
+    this.sun.target.position.set(cx, 0, cz);
+    const sc = this.sun.shadow.camera;
+    sc.left = -span; sc.right = span; sc.top = span; sc.bottom = -span;
+    sc.near = 10; sc.far = span * 5;
+    sc.updateProjectionMatrix();
+    return true;
+  },
+
+  // ---------------------------------------------------------------- 毎フレームの同期
+  sync() {
+    const f = ++this.fid;
+    const use = (ent, build, upd) => {
+      let o = this.ents.get(ent);
+      if (!o) {
+        o = build.call(this, ent);
+        this.dyn.add(o.root);
+        this.ents.set(ent, o);
+      }
+      o.seen = f;
+      upd.call(this, o, ent);
+    };
+    for (const rk of Play.obs) use(rk, this.buildRock, this.updRock);
+    if (Play.stairs) use(Play.stairs, this.buildStairs, this.updStairs);
+    for (const p of Play.pickups) use(p, this.buildPickup, this.updPickup);
+    for (const e of Play.enemies) use(e, this.buildEnemy, this.updEnemy);
+    for (const b of Play.bullets) use(b, this.buildBullet, this.updBullet);
+    for (const w of Play.waves) use(w, this.buildRing, this.updShock);
+    for (const r of fx.rings) use(r, this.buildRing, this.updFxRing);
+    use(player, this.buildPlayer, this.updPlayer);
+    // 消えたものを片付ける（形状は共有なので材質だけ捨てる）
+    for (const [k, o] of this.ents) {
+      if (o.seen === f) continue;
+      this.dyn.remove(o.root);
+      for (const m of o.mats) m.dispose();
+      if (o.fanGeo) o.fanGeo.dispose();
+      this.ents.delete(k);
+    }
+    this.syncParticles();
+  },
+
+  syncParticles() {
+    const g = this.points.geometry, pos = g.attributes.position.array, col = g.attributes.color.array;
+    const n = Math.min(this.MAXP, fx.parts.length);
+    for (let i = 0; i < n; i++) {
+      const p = fx.parts[i], t = p.life / p.max, k = i * 3;
+      if (!p.cc) p.cc = new THREE.Color(p.c);
+      pos[k] = p.x; pos[k + 1] = p.h; pos[k + 2] = p.y;
+      col[k] = p.cc.r * t; col[k + 1] = p.cc.g * t; col[k + 2] = p.cc.b * t;
+    }
+    g.setDrawRange(0, n);
+    g.attributes.position.needsUpdate = true;
+    g.attributes.color.needsUpdate = true;
+  },
+
+  // ---------------------------------------------------------------- プレイヤー
+  buildPlayer() {
+    const o = this.newObj(), G = this.G;
+    const blue = this.mat(o, 0x4682f0, { shininess: 50 }), gold = this.mat(o, 0xfad246);
+    const white = this.mat(o, 0xffffff), black = this.mat(o, 0x141428);
+    o.flash.push(blue);
+    this.part(o, G.sphere, blue, [PR, PR * 1.05, PR], [0, PR + 2, 0]);
+    this.part(o, G.cone, gold, [6, 12, 6], [0, PR * 2 + 7, -2], null, false);
+    for (const s of [-1, 1]) {
+      this.part(o, G.sphere, white, [3.6, 3.8, 2.5], [s * 6, PR + 7, PR - 2.2], null, false);
+      this.part(o, G.sphere, black, [2, 2.2, 1.4], [s * 6, PR + 7, PR + 0.2], null, false);
+    }
+    o.blade = new THREE.Mesh(G.box, this.mat(o, 0xdce6f0, { shininess: 100, specular: 0xffffff }));
+    o.blade.castShadow = true;
+    o.hilt = new THREE.Mesh(G.box, this.mat(o, 0x8a5a2a));
+    o.root.add(o.blade, o.hilt);
+
+    o.fanGeo = new THREE.BufferGeometry();
+    o.fanGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 9), 3));
+    o.fanMat = this.glow(o, 0xffffff, 0.5);
+    o.fanMat.side = THREE.DoubleSide;
+    o.fan = new THREE.Mesh(o.fanGeo, o.fanMat);
+    o.fan.frustumCulled = false;
+    o.root.add(o.fan);
+
+    const orbMat = this.mat(o, 0xbfe6ff, { emissive: 0x4a88ff });
+    o.orbs = [];
+    for (let i = 0; i < 4; i++) {
+      const m = new THREE.Mesh(G.sphere, orbMat);
+      m.scale.setScalar(ORB_R);
+      m.castShadow = true;
+      o.root.add(m);
+      o.orbs.push(m);
+    }
+    const ghostMat = this.glow(o, 0x50a0ff, 0.3);
+    o.ghosts = [];
+    for (let i = 0; i < 6; i++) {
+      const m = new THREE.Mesh(G.sphere, ghostMat);
+      m.scale.setScalar(PR);
+      o.root.add(m);
+      o.ghosts.push(m);
+    }
+    return o;
+  },
+  updPlayer(o, p) {
+    o.root.visible = Play.state !== 'dying';
+    o.body.position.set(p.x, 0, p.y);
+    o.body.rotation.y = Math.atan2(p.fx, p.fy);
+    const blink = p.inv > 0 && p.dash === 0 && ((p.frame / 3) | 0) % 2 === 0;
+    o.body.visible = !blink;
+
+    // 剣。振っている間は軌跡の扇を地面に出す
+    let ang, r0, len, hx = p.x, hy = p.y;
+    if (p.swing > 0) {
+      const t = 1 - p.swing / SWING, ease = 1 - (1 - t) * (1 - t);
+      const arc = p.spin ? TAU : p.arc(), start = p.swingA - arc / 2;
+      ang = start + arc * Math.min(1, ease * 1.25);
+      r0 = PR;
+      len = p.range() * 0.92 - PR;
+      this.fillFan(o, p.x, p.y, p.range(), start, ang);
+      o.fan.visible = true;
+      o.fanMat.opacity = 0.5 * (1 - t);
+      o.fanMat.color.setHex(p.spin ? 0xc88cff : 0xffffff);
+    } else {
+      o.fan.visible = false;
+      hx = p.x - p.fy * (PR - 2);
+      hy = p.y + p.fx * (PR - 2);
+      ang = Math.atan2(p.fy, p.fx);
+      r0 = 0;
+      len = 26;
+    }
+    const dx = Math.cos(ang), dy = Math.sin(ang), mid = r0 + len / 2;
+    o.blade.position.set(hx + dx * mid, 22, hy + dy * mid);
+    o.blade.rotation.y = Math.atan2(dx, dy);
+    o.blade.scale.set(4, 1.6, len);
+    o.hilt.position.set(hx + dx * r0, 22, hy + dy * r0);
+    o.hilt.rotation.y = o.blade.rotation.y;
+    o.hilt.scale.set(12, 3, 3);
+    o.blade.visible = o.hilt.visible = !blink;
+
+    o.orbs.forEach((m, i) => {
+      m.visible = i < p.orbCount();
+      if (m.visible) { const [x, y] = p.orbPos(i); m.position.set(x, 24, y); }
+    });
+    o.ghosts.forEach((m, i) => {
+      const t = p.trail[i + 1];
+      m.visible = !!t;
+      if (t) m.position.set(t[0], PR + 2, t[1]);
+    });
+  },
+  fillFan(o, x, y, R, a0, a1) {
+    const n = Math.max(2, Math.min(64, Math.ceil(Math.abs(a1 - a0) / 0.1)));
+    const arr = o.fanGeo.attributes.position.array;
+    for (let i = 0; i < n; i++) {
+      const t0 = a0 + (a1 - a0) * i / n, t1 = a0 + (a1 - a0) * (i + 1) / n, k = i * 9;
+      arr[k] = x; arr[k + 1] = 4; arr[k + 2] = y;
+      arr[k + 3] = x + Math.cos(t0) * R; arr[k + 4] = 4; arr[k + 5] = y + Math.sin(t0) * R;
+      arr[k + 6] = x + Math.cos(t1) * R; arr[k + 7] = 4; arr[k + 8] = y + Math.sin(t1) * R;
+    }
+    o.fanGeo.attributes.position.needsUpdate = true;
+    o.fanGeo.setDrawRange(0, n * 3);
+  },
+
+  // ---------------------------------------------------------------- 敵
+  buildEnemy(e) {
+    const o = this.newObj(), G = this.G, r = e.r;
+    const P = (geo, m, s, p, cast = true) => this.part(o, geo, m, s, p, null, cast);
+    o.magic = new THREE.Mesh(G.ring, this.glow(o, 0xc850ff, 0.8));
+    o.root.add(o.magic);
+    const black = this.mat(o, 0x141420);
+    switch (e.type) {
+      case 'slime': {
+        const c = this.mat(o, 0x2870dc, { shininess: 90, specular: 0x9ab8ff });
+        o.flash.push(c);
+        o.main = P(G.sphere, c, [r, r, r], [0, r, 0]);
+        o.tip = P(G.cone, c, [5, 11, 5], [0, 2 * r, 0], false);
+        o.face = new THREE.Group();
+        o.body.add(o.face);
+        for (const s of [-1, 1]) this.part(o, G.sphere, black, [2.6, 3, 1.5], [s * 5, 2, 0], o.face, false);
+        this.part(o, G.sphere, this.mat(o, 0xc8283c), [5, 2.5, 1.5], [0, -5, 0], o.face, false);
+        break;
+      }
+      case 'bat': {
+        const c = this.mat(o, 0x784aaa), w = this.mat(o, 0x5a3282, { side: THREE.DoubleSide });
+        o.flash.push(c, w);
+        o.fly = new THREE.Group();
+        o.body.add(o.fly);
+        this.part(o, G.sphere, c, [r, r, r], [0, 0, 0], o.fly);
+        for (const s of [-1, 1]) this.part(o, G.cone, c, [3.5, 9, 3.5], [s * 6, r + 2, 0], o.fly, false);
+        const eye = this.mat(o, 0xff3c3c, { emissive: 0xff2020 });
+        for (const s of [-1, 1]) this.part(o, G.sphere, eye, [2.4, 2.4, 1.5], [s * 4, 2, r - 1], o.fly, false);
+        o.wings = [-1, 1].map(s => {
+          const piv = new THREE.Group();
+          piv.position.set(s * (r - 3), 2, 0);
+          o.fly.add(piv);
+          const m = new THREE.Mesh(G.wing, w);
+          m.scale.set(s * 26, 1, 22);
+          m.castShadow = true;
+          piv.add(m);
+          return { piv, s };
+        });
+        break;
+      }
+      case 'mage': {
+        const robe = this.mat(o, 0x46286e), hat = this.mat(o, 0x6e32aa), skin = this.mat(o, 0xe6c8aa);
+        o.flash.push(robe, hat, skin);
+        P(G.cone, robe, [16, 32, 16], [0, 16, 0]);
+        P(G.sphere, skin, [9, 9, 9], [0, 36, 0]);
+        P(G.cyl, hat, [14, 2, 14], [0, 43, 0], false);
+        P(G.cone, hat, [12, 26, 12], [0, 56, 0]);
+        for (const s of [-1, 1]) P(G.sphere, black, [1.8, 1.8, 1], [s * 3.5, 37, 8.3], false);
+        P(G.cyl, this.mat(o, 0x96643c), [1.6, 46, 1.6], [16, 23, 4]);
+        o.orbM = this.mat(o, 0xdc78ff, { emissive: 0x9030c0 });
+        o.orb = P(G.sphere, o.orbM, [4, 4, 4], [16, 49, 4], false);
+        break;
+      }
+      case 'knight': {
+        const armor = this.mat(o, 0x8c919e, { shininess: 70, specular: 0xaaaaaa });
+        const steel = this.mat(o, 0xb4b9c8, { shininess: 100, specular: 0xffffff });
+        const wood = this.mat(o, 0x8c6432);
+        o.flash.push(armor, steel, wood);
+        P(G.cyl, armor, [r, 28, r], [0, 14, 0]);
+        P(G.sphere, steel, [r - 3, r - 3, r - 3], [0, 36, 0]);
+        P(G.box, black, [14, 3, 4], [0, 38, r - 5], false);
+        P(G.cone, this.mat(o, 0xc83232), [4, 14, 4], [0, 58, 0], false);
+        P(G.box, wood, [4, 24, 18], [-(r + 2), 18, 2]);
+        break;
+      }
+      case 'golem': {
+        const rock = this.mat(o, 0x8c7d69, { flatShading: true, shininess: 5 });
+        const dark = this.mat(o, 0x6e6455, { flatShading: true, shininess: 5 });
+        o.flash.push(rock, dark);
+        o.main = P(G.ico1, rock, [r, r * 0.95, r * 0.9], [0, r * 0.95, 0]);
+        P(G.ico, dark, [13, 11, 13], [-24, r * 1.65, 6], false);
+        P(G.ico, dark, [10, 9, 10], [22, r * 1.55, -10], false);
+        o.arms = [-1, 1].map(s => P(G.ico, dark, [17, 20, 17], [s * (r + 10), 26, 4]));
+        o.eyeM = this.mat(o, 0xffb43c, { emissive: 0xff8020 });
+        for (const s of [-1, 1]) P(G.box, o.eyeM, [12, 6, 4], [s * 14, r * 1.15, r * 0.82], false);
+        break;
+      }
+    }
+    return o;
+  },
+  updEnemy(o, e) {
+    o.body.position.set(e.x, 0, e.y);
+    o.body.rotation.y = Math.atan2(player.x - e.x, player.y - e.y);
+    const an = e.anim;
+    if (e.spawn > 0) {
+      // 魔法陣から出てくる
+      const t = 1 - e.spawn / (e.boss ? 90 : 45);
+      o.magic.visible = true;
+      o.magic.position.set(e.x, 1.5, e.y);
+      o.magic.scale.setScalar(e.r * (1.6 - t * 0.6));
+      o.magic.material.opacity = 0.8 * t;
+      o.body.scale.setScalar(t < 0.6 ? 0.001 : (t - 0.6) / 0.4);
+    } else {
+      o.magic.visible = false;
+      o.body.scale.setScalar(1);
+    }
+
+    switch (e.type) {
+      case 'slime': {
+        const hop = Math.max(0, Math.sin(an * 0.12 + e.seed)), sq = 1 - hop, lift = hop * 12;
+        const rx = e.r * (1 + 0.18 * sq), ry = e.r * (0.95 - 0.12 * sq);
+        o.main.scale.set(rx, ry, rx);
+        o.main.position.y = ry + lift;
+        o.tip.position.y = 2 * ry + lift + 3;
+        o.face.position.set(0, ry + lift, rx * 0.93);
+        break;
+      }
+      case 'bat': {
+        o.fly.position.y = 32 + Math.sin(an * 0.1) * 4;
+        const flap = Math.sin(an * 0.5) * 0.7;
+        for (const w of o.wings) w.piv.rotation.z = w.s * flap;
+        break;
+      }
+      case 'mage': {
+        const casting = e.aiT > 85;
+        o.orb.scale.setScalar(casting ? 7 + Math.sin(an * 0.6) * 2 : 4);
+        o.orbM.emissive.setHex(casting ? 0xff60ff : 0x9030c0);
+        break;
+      }
+      case 'golem': {
+        const sw = Math.sin(an * 0.08) * 6;
+        o.arms[0].position.y = 26 + sw;
+        o.arms[1].position.y = 26 - sw;
+        const enraged = e.hp < e.maxHp / 2;
+        o.eyeM.color.setHex(enraged ? 0xff3c28 : 0xffb43c);
+        o.eyeM.emissive.setHex(enraged ? 0xff2010 : 0xff8020);
+        break;
+      }
+    }
+
+    if (e.hitFlash > 4) this.setFlash(o, 0xffffff);
+    else if (e.type === 'knight' && e.st === 1 && ((an / 3) | 0) % 2 === 0) this.setFlash(o, 0xc02010);
+    else if (e.boss && (e.st === 1 || e.st === 2)) this.setFlash(o, Math.sin(an * 0.5) > 0 ? 0x903810 : 0x401400);
+    else this.setFlash(o, null);
+  },
+
+  // ---------------------------------------------------------------- アイテム・弾・岩・階段・輪
+  buildPickup(p) {
+    const o = this.newObj(), G = this.G;
+    if (p.kind === 'exp') {
+      const s = 4 + p.v, col = p.v >= 5 ? 0x78ff8c : 0x64c8ff;
+      o.gem = this.part(o, G.oct, this.mat(o, col, { emissive: col, emissiveIntensity: 0.5, shininess: 100 }), [s * 0.75, s * 1.2, s * 0.75], [0, 12, 0]);
+    } else if (p.kind === 'herb') {
+      const leaf = this.mat(o, 0x50d264);
+      for (const s of [-1, 1]) this.part(o, G.sphere, leaf, [5, 3, 10], [s * 5, 6, 0]).rotation.y = s * 0.5;
+      this.part(o, G.cyl, this.mat(o, 0x3c8c32), [1, 10, 1], [0, 5, 3], null, false);
+    } else {
+      const gold = this.mat(o, 0xf0c83c, { emissive: 0x604000, shininess: 90 });
+      this.part(o, G.box, this.mat(o, 0x965020), [40, 22, 26], [0, 11, 0]);
+      this.part(o, G.box, this.mat(o, 0xbe6e28), [42, 9, 28], [0, 26, 0]);
+      this.part(o, G.box, gold, [43, 3, 29], [0, 22, 0], null, false);
+      this.part(o, G.box, gold, [8, 10, 2], [0, 18, 14], null, false);
+      o.halo = new THREE.Mesh(G.disc, this.glow(o, 0xffdc50, 0.35));
+      o.halo.scale.setScalar(36);
+      o.halo.position.y = 1;
+      o.body.add(o.halo);
+    }
+    return o;
+  },
+  updPickup(o, p) {
+    o.body.position.set(p.x, 0, p.y);
+    if (o.gem) {
+      o.gem.rotation.y += 0.06;
+      o.gem.position.y = 12 + Math.sin((Play.frames + p.x) * 0.1) * 3;
+    }
+    if (o.halo) o.halo.material.opacity = 0.25 + 0.15 * Math.sin(Play.frames * 0.08);
+  },
+  buildBullet(b) {
+    const o = this.newObj();
+    this.part(o, this.G.sphere, this.mat(o, 0xffffe6, { emissive: 0xffffe6 }), [b.r * 0.6, b.r * 0.6, b.r * 0.6], [0, 18, 0], null, false);
+    const g = new THREE.Mesh(this.G.sphere, this.glow(o, new THREE.Color(b.c), 0.55));
+    g.scale.setScalar(b.r + 5);
+    g.position.y = 18;
+    o.body.add(g);
+    return o;
+  },
+  updBullet(o, b) { o.body.position.set(b.x, 0, b.y); },
+  buildRock(rk) {
+    const o = this.newObj(), m = this.mat(o, 0x7a7680, { flatShading: true, shininess: 6 });
+    const a = this.part(o, this.G.ico, m, [rk.r, rk.r * 0.85, rk.r], [0, rk.r * 0.55, 0]);
+    const b = this.part(o, this.G.ico, m, [rk.r * 0.4, rk.r * 0.36, rk.r * 0.4], [rk.r * 0.62, rk.r * 0.18, rk.r * 0.42]);
+    for (const n of [a, b]) { n.rotation.set(rnd(0, 3), rnd(0, 3), rnd(0, 3)); n.receiveShadow = true; }
+    return o;
+  },
+  updRock(o, rk) { o.body.position.set(rk.x, 0, rk.y); },
+  buildStairs() {
+    const o = this.newObj(), G = this.G;
+    this.part(o, G.box, this.mat(o, 0x14100e), [60, 2, 60], [0, 1, 0], null, false).receiveShadow = true;
+    for (let i = 0; i < 4; i++) {
+      const c = new THREE.Color(rgb(110 - i * 20, 100 - i * 20, 90 - i * 18));
+      this.part(o, G.box, this.mat(o, c), [48 - i * 8, 2, 9], [0, 2.2, -21 + i * 13], null, false);
+    }
+    o.halo = new THREE.Mesh(G.disc, this.glow(o, 0xffdc78, 0.4));
+    o.halo.position.y = 0.5;
+    o.body.add(o.halo);
+    o.beam = new THREE.Mesh(G.cyl, this.glow(o, 0xffe6a0, 0.15));
+    o.beam.scale.set(30, 160, 30);
+    o.beam.position.y = 80;
+    o.body.add(o.beam);
+    return o;
+  },
+  updStairs(o, s) {
+    const pulse = (Math.sin(Play.frames * 0.1) + 1) / 2;
+    o.body.position.set(s.x, 0, s.y);
+    o.halo.scale.setScalar(46 + pulse * 8);
+    o.halo.material.opacity = 0.3 + 0.3 * pulse;
+    o.beam.material.opacity = 0.08 + 0.1 * pulse;
+  },
+  buildRing() {
+    const o = this.newObj();
+    o.ring = new THREE.Mesh(this.G.ring, this.glow(o, 0xffffff, 1));
+    o.ring.position.y = 2;
+    o.body.add(o.ring);
+    return o;
+  },
+  updShock(o, w) {
+    o.body.position.set(w.x, 0, w.y);
+    o.ring.scale.setScalar(Math.max(1, w.r));
+    o.ring.material.color.setHex(0xffa050);
+    o.ring.material.opacity = 0.9 * (1 - w.r / w.max);
+  },
+  updFxRing(o, r) {
+    const t = 1 - r.life / r.max;
+    o.body.position.set(r.x, 0, r.y);
+    o.ring.scale.setScalar(Math.max(1, r.R * (0.2 + 0.8 * t)));
+    o.ring.material.color.set(r.c);
+    o.ring.material.opacity = 1 - t;
+  },
+};
+
+// ===========================================================================
 // メインループ（60fps 固定ステップ）
 // ===========================================================================
 if (matchMedia('(pointer: coarse)').matches) { touchUI = true; autoAttack = true; }
+V.init();
 layout();
 let last = performance.now(), acc = 0;
 const STEP = 1000 / 60;
@@ -1455,9 +1911,14 @@ function frame(now) {
   }
   if (steps === 5) acc = 0;
 
+  V.render();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = '#0e0c14';
-  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (Game.scene === 'play' && V.ok) {
+    ctx.clearRect(0, 0, cv.width, cv.height); // 3D が透けて見えるように
+  } else {
+    ctx.fillStyle = '#0e0c14';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
   ctx.setTransform(S * DPR, 0, 0, S * DPR, OX * DPR, OY * DPR);
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
